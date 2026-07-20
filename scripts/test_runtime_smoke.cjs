@@ -195,6 +195,7 @@ async function main() {
   });
   await sendBridgeData(rendererA, 1, 0, {
     type: "renderer-bridge-ready",
+    currentThreadId: null,
   });
 
   const rendererB = await connect();
@@ -214,11 +215,11 @@ async function main() {
     (frame) =>
       frame.type === "bridge-data" &&
       frame.message?.type === "ipc-main-event" &&
-      frame.message?.args?.[0]?.type ===
-        "codex-app-server-connection-changed",
+      frame.message?.args?.[0]?.type === "codex-app-server-connection-changed",
   );
   await sendBridgeData(rendererB, 1, 0, {
     type: "renderer-bridge-ready",
+    currentThreadId: null,
   });
   const recoveryFrame = await rendererBRecovery;
 

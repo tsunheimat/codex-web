@@ -22,17 +22,28 @@ export function mapBrowserPathToInitialRoute(pathname: string, search: string) {
   };
 }
 
-function mapBrowserPathToRoute(pathname: string): string {
+export function currentThreadIdFromBrowserPath(
+  pathname: string,
+): string | null {
   const match = pathname.match(/^\/thread\/([^/]+)$/);
-  if (match) {
-    try {
-      return `/local/${decodeURIComponent(match[1])}`;
-    } catch {
-      return "/";
-    }
+  if (!match) {
+    return null;
   }
+  try {
+    const threadId = decodeURIComponent(match[1]);
+    return threadId.length > 0 &&
+      threadId.length <= 128 &&
+      !/[\u0000-\u001f\u007f/?#]/.test(threadId)
+      ? threadId
+      : null;
+  } catch {
+    return null;
+  }
+}
 
-  return "/";
+function mapBrowserPathToRoute(pathname: string): string {
+  const threadId = currentThreadIdFromBrowserPath(pathname);
+  return threadId === null ? "/" : `/local/${threadId}`;
 }
 
 export function mapMemoryPathToBrowserPath(pathname: string) {

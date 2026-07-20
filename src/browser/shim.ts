@@ -1,4 +1,5 @@
 import {
+  currentThreadIdFromBrowserPath,
   mapBrowserPathToInitialRoute,
   mapMemoryPathToBrowserPath,
 } from "./routes";
@@ -16,6 +17,7 @@ type IpcListener = (event: unknown, ...args: unknown[]) => void;
 type RendererToMainMessage =
   | {
       type: "renderer-bridge-ready";
+      currentThreadId: string | null;
     }
   | {
       type: "ipc-renderer-invoke";
@@ -527,6 +529,20 @@ function resetBridge(reason: string): void {
   window.location.reload();
 }
 
+window.addEventListener("offline", () => {
+  if (
+    socket &&
+    (socket.readyState === WebSocket.OPEN ||
+      socket.readyState === WebSocket.CONNECTING)
+  ) {
+    socket.close(1000, "browser offline");
+  }
+});
+
+window.addEventListener("online", () => {
+  ensureSocket();
+});
+
 function nextRequestId(): string {
   requestCounter += 1;
   return `ipc_bridge_${requestCounter}`;
@@ -554,7 +570,10 @@ function addIpcListener(channel: string, listener: IpcListener): void {
     !rendererBridgeReadySent
   ) {
     rendererBridgeReadySent = true;
-    enqueueMessage({ type: "renderer-bridge-ready" });
+    enqueueMessage({
+      type: "renderer-bridge-ready",
+      currentThreadId: currentThreadIdFromBrowserPath(window.location.pathname),
+    });
   }
 }
 

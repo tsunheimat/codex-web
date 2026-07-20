@@ -34,6 +34,7 @@ const childLogs = new Map();
 const children = new Set();
 let browserContext = null;
 const maximumChildLogCharacters = 100_000;
+const exactlyOnceStabilityWindowMs = 1_500;
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -207,14 +208,43 @@ function attachPageDiagnostics(page, diagnostics) {
   });
   page.on("websocket", (websocket) => {
     boundedPush(diagnostics.websockets, websocket.url(), 100);
+    const ipcSocket = websocket.url().endsWith("/__backend/ipc")
+      ? {
+          sequence: diagnostics.ipcWebSockets.length + 1,
+          url: websocket.url(),
+          createdAt: Date.now(),
+          closedAt: null,
+          receivedControlFrames: [],
+          sentControlFrames: [],
+        }
+      : null;
+    if (ipcSocket) {
+      boundedPush(diagnostics.ipcWebSockets, ipcSocket, 100);
+      websocket.on("close", () => {
+        ipcSocket.closedAt = Date.now();
+      });
+      websocket.on("socketerror", (error) => {
+        ipcSocket.socketError = String(error);
+      });
+    }
     websocket.on("framesent", (event) => {
-      const frame = compactWebSocketFrame(String(event.payload));
+      const payload = String(event.payload);
+      const controlFrame = compactBridgeControlFrame(payload);
+      if (ipcSocket && controlFrame !== null) {
+        boundedPush(ipcSocket.sentControlFrames, controlFrame, 50);
+      }
+      const frame = compactWebSocketFrame(payload);
       if (frame !== null) {
         boundedPush(diagnostics.sentFrames, frame, 500);
       }
     });
     websocket.on("framereceived", (event) => {
-      const frame = compactWebSocketFrame(String(event.payload));
+      const payload = String(event.payload);
+      const controlFrame = compactBridgeControlFrame(payload);
+      if (ipcSocket && controlFrame !== null) {
+        boundedPush(ipcSocket.receivedControlFrames, controlFrame, 50);
+      }
+      const frame = compactWebSocketFrame(payload);
       if (frame !== null) {
         boundedPush(diagnostics.receivedFrames, frame, 500);
       }
@@ -229,6 +259,30 @@ function boundedPush(values, value, maximumLength) {
   }
 }
 
+function compactBridgeControlFrame(frame) {
+  try {
+    const parsed = JSON.parse(frame);
+    if (parsed.type === "bridge-hello") {
+      return {
+        type: parsed.type,
+        protocolVersion: parsed.protocolVersion,
+        connectionId: parsed.connectionId,
+        serverEpoch: parsed.serverEpoch,
+      };
+    }
+    if (parsed.type === "bridge-ready") {
+      return {
+        type: parsed.type,
+        connectionId: parsed.connectionId,
+        serverEpoch: parsed.serverEpoch,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function compactWebSocketFrame(frame) {
   try {
     const parsed = JSON.parse(frame);
@@ -239,7 +293,9 @@ function compactWebSocketFrame(frame) {
     const argumentType = firstArgument?.type;
     const requestMethod = firstArgument?.request?.method;
     const eventMethod = firstArgument?.method;
+    const rendererReady = parsed.message?.type === "renderer-bridge-ready";
     const relevant =
+      rendererReady ||
       requestMethod?.startsWith("thread/") ||
       requestMethod?.startsWith("turn/") ||
       argumentType === "thread-role-request" ||
@@ -262,6 +318,7 @@ function compactWebSocketFrame(frame) {
       message: {
         type: parsed.message?.type,
         channel: parsed.message?.channel,
+        currentThreadId: parsed.message?.currentThreadId,
         argument: {
           type: firstArgument?.type,
           url: firstArgument?.url,
@@ -430,11 +487,18 @@ async function assertExactlyOnce(page, marker) {
     async () => (await page.locator("body").innerText()).includes(marker),
     60_000,
   );
-  const bodyText = await page.locator("body").innerText();
+  let bodyText = await page.locator("body").innerText();
   assert.equal(
     bodyText.split(marker).length - 1,
     1,
     `expected exactly one visible occurrence of ${marker}`,
+  );
+  await wait(exactlyOnceStabilityWindowMs);
+  bodyText = await page.locator("body").innerText();
+  assert.equal(
+    bodyText.split(marker).length - 1,
+    1,
+    `late duplicate of ${marker} appeared during the ${exactlyOnceStabilityWindowMs}ms stability window`,
   );
 }
 
@@ -474,6 +538,29 @@ async function waitForOfficialThreadRehydration(framesSince, phase) {
         return false;
       }
     },
+    30_000,
+  );
+}
+
+function threadIdFromBrowserUrl(browserUrl) {
+  const match = new URL(browserUrl).pathname.match(/^\/thread\/([^/]+)$/);
+  assert(match, `expected canonical Browser thread URL, got ${browserUrl}`);
+  return decodeURIComponent(match[1]);
+}
+
+async function waitForRendererReadyThread(
+  framesSince,
+  expectedThreadId,
+  phase,
+) {
+  await waitFor(
+    `${phase} renderer-ready current thread identity`,
+    () =>
+      bridgePayloads(framesSince()).some(
+        (payload) =>
+          payload.type === "renderer-bridge-ready" &&
+          payload.currentThreadId === expectedThreadId,
+      ),
     30_000,
   );
 }
@@ -525,6 +612,7 @@ async function main() {
   const diagnostics = {
     blockedBrowserRequests: [],
     console: [],
+    ipcWebSockets: [],
     pageErrors: [],
     receivedFrames: [],
     sentFrames: [],
@@ -678,9 +766,58 @@ async function main() {
     await submitPrompt(page, reconnect.token);
     await waitForScenarioStarted(mockReady.baseUrl, reconnect);
     await waitForPartialOutput(page, reconnect);
+    const originalIpcSocket = await waitFor(
+      "original IPC WebSocket handshake",
+      () =>
+        diagnostics.ipcWebSockets.find(
+          (socket) =>
+            socket.sentControlFrames.some(
+              (frame) =>
+                frame.type === "bridge-hello" && frame.serverEpoch === null,
+            ) &&
+            socket.receivedControlFrames.some(
+              (frame) => frame.type === "bridge-ready",
+            ),
+        ),
+      30_000,
+    );
+    const originalHello = originalIpcSocket.sentControlFrames.find(
+      (frame) => frame.type === "bridge-hello",
+    );
+    const originalReady = originalIpcSocket.receivedControlFrames.find(
+      (frame) => frame.type === "bridge-ready",
+    );
+    assert.equal(originalHello.connectionId, originalReady.connectionId);
+    assert.equal(originalHello.serverEpoch, null);
     await browserContext.setOffline(true);
-    await wait(1_200);
+    await waitFor(
+      "original IPC WebSocket close while Chromium is offline",
+      () => originalIpcSocket.closedAt !== null,
+      30_000,
+    );
     await browserContext.setOffline(false);
+    const replacementIpcSocket = await waitFor(
+      "replacement IPC WebSocket handshake",
+      () =>
+        diagnostics.ipcWebSockets.find(
+          (socket) =>
+            socket.sequence > originalIpcSocket.sequence &&
+            socket.sentControlFrames.some(
+              (frame) =>
+                frame.type === "bridge-hello" &&
+                frame.connectionId === originalReady.connectionId &&
+                frame.serverEpoch === originalReady.serverEpoch,
+            ) &&
+            socket.receivedControlFrames.some(
+              (frame) =>
+                frame.type === "bridge-ready" &&
+                frame.connectionId === originalReady.connectionId &&
+                frame.serverEpoch === originalReady.serverEpoch,
+            ),
+        ),
+      30_000,
+    );
+    assert.notEqual(replacementIpcSocket.sequence, originalIpcSocket.sequence);
     await waitForScenarioCompleted(mockReady.baseUrl, reconnect);
     await assertExactlyOnce(page, reconnect.output);
     assertRuntimeIdentity(server, serverPid, appServerPids);
@@ -690,8 +827,14 @@ async function main() {
     await waitForScenarioStarted(mockReady.baseUrl, refresh);
     await waitForPartialOutput(page, refresh);
     const threadUrl = page.url();
+    const threadId = threadIdFromBrowserUrl(threadUrl);
     const framesBeforeRefresh = diagnostics.sentFrames.length;
     await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForRendererReadyThread(
+      () => diagnostics.sentFrames.slice(framesBeforeRefresh),
+      threadId,
+      "hard refresh",
+    );
     await waitForOfficialThreadRehydration(
       () => diagnostics.sentFrames.slice(framesBeforeRefresh),
       "hard refresh",
@@ -706,6 +849,7 @@ async function main() {
     await waitForScenarioStarted(mockReady.baseUrl, reopen);
     await waitForPartialOutput(page, reopen);
     const resumeUrl = page.url();
+    const resumeThreadId = threadIdFromBrowserUrl(resumeUrl);
     await closeBrowser();
     await waitForScenarioCompleted(mockReady.baseUrl, reopen);
     await wait(1_200);
@@ -715,6 +859,11 @@ async function main() {
     page = await launchBrowser(profileTwo, diagnostics, browserOrigin);
     await page.goto(resumeUrl, { waitUntil: "domcontentloaded" });
     await passFirstRunOnboarding(page);
+    await waitForRendererReadyThread(
+      () => diagnostics.sentFrames.slice(framesBeforeReopen),
+      resumeThreadId,
+      "browser reopen",
+    );
     await waitForOfficialThreadRehydration(
       () => diagnostics.sentFrames.slice(framesBeforeReopen),
       "browser reopen",
@@ -772,6 +921,13 @@ async function main() {
           appServerPid,
           mockProviderPid: mockReady.pid,
           blockedExternalServerRequests: blockedServerRequests.length,
+          reconnectEvidence: {
+            originalSocketSequence: originalIpcSocket.sequence,
+            originalClosed: originalIpcSocket.closedAt !== null,
+            replacementSocketSequence: replacementIpcSocket.sequence,
+            reusedConnectionId: true,
+            reusedServerEpoch: true,
+          },
           scenarioRequestCounts: Object.fromEntries(
             scenarios.map((scenario) => [
               scenario.name,
