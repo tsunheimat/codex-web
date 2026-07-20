@@ -8,6 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { chromium } = require("playwright");
+const sharp = require("sharp");
 
 const repositoryRoot = path.resolve(__dirname, "..");
 const scenarios = [
@@ -619,7 +620,15 @@ async function passFirstRunOnboarding(page) {
 
 async function exerciseWorkspaceFiles(
   page,
-  { browseRoot, nestedWorkspace, outsideFile, uploadFixture, uploadBytes },
+  {
+    activeContentFixtures,
+    browseRoot,
+    nestedWorkspace,
+    outsideFile,
+    rasterFixtures,
+    uploadFixture,
+    uploadBytes,
+  },
 ) {
   const projectSelector = page.locator(
     '[data-composer-navigation-target="workspace-project"]',
@@ -754,13 +763,201 @@ async function exerciseWorkspaceFiles(
     shimRejected: true,
   });
 
+  const relativeCwdEvidence = [];
+  for (const [type, method, cwd] of [
+    ["mcp-request", "thread/start", "relative/repo"],
+    ["mcp-request", "thread/resume", "../outside"],
+    ["thread-prewarm-start", "thread/start", "."],
+  ]) {
+    const marker = `phase3-relative-cwd-${relativeCwdEvidence.length}`;
+    const errorMessage = await page.evaluate(
+      async ({ cwd, marker, method, type }) => {
+        try {
+          await window.electronBridge.sendMessageFromView({
+            type,
+            request: {
+              id: marker,
+              method,
+              params: { cwd },
+            },
+          });
+          return null;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      },
+      { cwd, marker, method, type },
+    );
+    assert.equal(
+      errorMessage,
+      "cwd must be absolute when CODEX_WEBUI_BROWSE_ROOT is configured",
+    );
+    relativeCwdEvidence.push({ cwd, errorMessage, marker, method, type });
+  }
+
+  const atFsUrl = (filePath) =>
+    `/@fs${filePath.split(path.sep).map(encodeURIComponent).join("/")}`;
+  const activeContentHeaders = await page.evaluate(
+    async (fixtures) =>
+      await Promise.all(
+        fixtures.map(async ({ name, url }) => {
+          const response = await fetch(url);
+          await response.body?.cancel();
+          return {
+            name,
+            status: response.status,
+            contentType: response.headers.get("content-type"),
+            contentDisposition: response.headers.get("content-disposition"),
+            contentSecurityPolicy: response.headers.get(
+              "content-security-policy",
+            ),
+            nosniff: response.headers.get("x-content-type-options"),
+          };
+        }),
+      ),
+    activeContentFixtures.map(({ name, path: filePath }) => ({
+      name,
+      url: atFsUrl(filePath),
+    })),
+  );
+  for (const headers of activeContentHeaders) {
+    assert.equal(headers.status, 200, headers.name);
+    assert.equal(headers.contentType, "application/octet-stream", headers.name);
+    assert.match(headers.contentDisposition, /^attachment;/, headers.name);
+    assert.equal(
+      headers.contentSecurityPolicy,
+      "sandbox; default-src 'none'",
+      headers.name,
+    );
+    assert.equal(headers.nosniff, "nosniff", headers.name);
+  }
+
+  await page.evaluate(() => {
+    delete window.__codexPhase3ActiveContentSentinel;
+    localStorage.removeItem("codex-phase3-active-content-sentinel");
+  });
+
+  const htmlFixture = activeContentFixtures.find(({ name }) =>
+    name.endsWith(".html"),
+  );
+  const htmlDownloadPromise = page.waitForEvent("download", {
+    timeout: 30_000,
+  });
+  await page.evaluate(
+    (url) => window.location.assign(url),
+    atFsUrl(htmlFixture.path),
+  );
+  const htmlDownload = await htmlDownloadPromise;
+  assert.equal(htmlDownload.suggestedFilename(), htmlFixture.name);
+
+  const javascriptFixture = activeContentFixtures.find(({ name }) =>
+    name.endsWith(".js"),
+  );
+  const scriptLoadResult = await page.evaluate(async (url) => {
+    return await new Promise((resolve) => {
+      const script = document.createElement("script");
+      const timeout = window.setTimeout(() => resolve("timeout"), 2_000);
+      script.onload = () => {
+        clearTimeout(timeout);
+        resolve("load");
+      };
+      script.onerror = () => {
+        clearTimeout(timeout);
+        resolve("error");
+      };
+      script.src = url;
+      document.head.append(script);
+    });
+  }, atFsUrl(javascriptFixture.path));
+  assert.notEqual(scriptLoadResult, "load");
+
+  const svgFixture = activeContentFixtures.find(({ name }) =>
+    name.endsWith(".svg"),
+  );
+  await page.evaluate(async (url) => {
+    const frame = document.createElement("iframe");
+    frame.hidden = true;
+    frame.src = url;
+    document.body.append(frame);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    frame.remove();
+  }, atFsUrl(svgFixture.path));
+
+  const activeContentSentinel = await page.evaluate(() => ({
+    global: window.__codexPhase3ActiveContentSentinel ?? null,
+    localStorage: localStorage.getItem("codex-phase3-active-content-sentinel"),
+  }));
+  assert.deepEqual(activeContentSentinel, {
+    global: null,
+    localStorage: null,
+  });
+
+  const rasterEvidence = await page.evaluate(
+    async (fixtures) =>
+      await Promise.all(
+        fixtures.map(async ({ expectedContentType, name, url }) => {
+          const response = await fetch(url);
+          const headers = {
+            contentDisposition: response.headers.get("content-disposition"),
+            contentSecurityPolicy: response.headers.get(
+              "content-security-policy",
+            ),
+            contentType: response.headers.get("content-type"),
+            nosniff: response.headers.get("x-content-type-options"),
+            status: response.status,
+          };
+          await response.body?.cancel();
+          const decoded = await new Promise((resolve) => {
+            const image = new Image();
+            image.onload = () =>
+              resolve({
+                height: image.naturalHeight,
+                width: image.naturalWidth,
+              });
+            image.onerror = () => resolve(null);
+            image.src = url;
+          });
+          return { decoded, expectedContentType, headers, name };
+        }),
+      ),
+    rasterFixtures.map(({ contentType, name, path: filePath }) => ({
+      expectedContentType: contentType,
+      name,
+      url: atFsUrl(filePath),
+    })),
+  );
+  for (const raster of rasterEvidence) {
+    assert.equal(raster.headers.status, 200, raster.name);
+    assert.equal(
+      raster.headers.contentType,
+      raster.expectedContentType,
+      raster.name,
+    );
+    assert.equal(raster.headers.contentDisposition, null, raster.name);
+    assert.equal(
+      raster.headers.contentSecurityPolicy,
+      "sandbox; default-src 'none'",
+      raster.name,
+    );
+    assert.equal(raster.headers.nosniff, "nosniff", raster.name);
+    assert.deepEqual(raster.decoded, { height: 1, width: 1 }, raster.name);
+  }
+
   return {
+    activeContentEvidence: {
+      headers: activeContentHeaders,
+      htmlNavigationDownloadedAs: htmlDownload.suggestedFilename(),
+      javascriptLoadResult: scriptLoadResult,
+      sentinel: activeContentSentinel,
+    },
     browseRoot,
     selectedWorkspace: nestedWorkspace,
     uploadedPath: uploadResult.files[0].path,
     uploadedLabel: uploadResult.files[0].label,
     downloadedBytes: uploadBytes.length,
     boundaryStatuses,
+    rasterEvidence,
+    relativeCwdEvidence,
   };
 }
 
@@ -937,6 +1134,29 @@ async function main() {
   const nestedWorkspace = path.join(browseRoot, "alpha");
   const outsideRoot = path.join(tempRoot, "outside-root");
   const outsideFile = path.join(outsideRoot, "secret.txt");
+  const activeContentFixtures = [
+    {
+      name: "phase3-hostile.html",
+      path: path.join(nestedWorkspace, "phase3-hostile.html"),
+    },
+    {
+      name: "phase3-hostile.js",
+      path: path.join(nestedWorkspace, "phase3-hostile.js"),
+    },
+    {
+      name: "phase3-hostile.svg",
+      path: path.join(nestedWorkspace, "phase3-hostile.svg"),
+    },
+  ];
+  const rasterFixtures = [
+    { name: "phase3-preview.png", contentType: "image/png" },
+    { name: "phase3-preview.jpg", contentType: "image/jpeg" },
+    { name: "phase3-preview.gif", contentType: "image/gif" },
+    { name: "phase3-preview.webp", contentType: "image/webp" },
+  ].map((fixture) => ({
+    ...fixture,
+    path: path.join(nestedWorkspace, fixture.name),
+  }));
   const uploadFixture = path.join(tempRoot, "phase3-upload.bin");
   const uploadBytes = Buffer.from([0, 1, 2, 3, 0xfe, 0xff, 0x41, 0x42]);
   const profileOne = path.join(tempRoot, "chromium-profile-one");
@@ -974,6 +1194,39 @@ async function main() {
       fs.writeFile(outsideFile, "outside browse authority", { mode: 0o600 }),
       fs.writeFile(uploadFixture, uploadBytes, { mode: 0o600 }),
     ]);
+    await Promise.all([
+      fs.writeFile(
+        activeContentFixtures[0].path,
+        '<script>window.top.__codexPhase3ActiveContentSentinel="html";localStorage.setItem("codex-phase3-active-content-sentinel","html")</script>',
+        { mode: 0o600 },
+      ),
+      fs.writeFile(
+        activeContentFixtures[1].path,
+        'window.__codexPhase3ActiveContentSentinel="javascript";localStorage.setItem("codex-phase3-active-content-sentinel","javascript")',
+        { mode: 0o600 },
+      ),
+      fs.writeFile(
+        activeContentFixtures[2].path,
+        '<svg xmlns="http://www.w3.org/2000/svg" onload="window.top.__codexPhase3ActiveContentSentinel=&quot;svg&quot;;localStorage.setItem(&quot;codex-phase3-active-content-sentinel&quot;,&quot;svg&quot;)"><rect width="10" height="10"/></svg>',
+        { mode: 0o600 },
+      ),
+    ]);
+    await Promise.all(
+      rasterFixtures.map(({ name, path: filePath }) => {
+        const image = sharp({
+          create: {
+            width: 1,
+            height: 1,
+            channels: 4,
+            background: { r: 0, g: 128, b: 255, alpha: 1 },
+          },
+        });
+        if (name.endsWith(".png")) return image.png().toFile(filePath);
+        if (name.endsWith(".jpg")) return image.jpeg().toFile(filePath);
+        if (name.endsWith(".gif")) return image.gif().toFile(filePath);
+        return image.webp().toFile(filePath);
+      }),
+    );
 
     mockProvider = captureChild(
       spawn(process.execPath, ["test/fixtures/mock-responses-provider.cjs"], {
@@ -1091,9 +1344,11 @@ async function main() {
     });
     await passFirstRunOnboarding(page);
     workspaceFilesEvidence = await exerciseWorkspaceFiles(page, {
+      activeContentFixtures,
       browseRoot,
       nestedWorkspace,
       outsideFile,
+      rasterFixtures,
       uploadFixture,
       uploadBytes,
     });

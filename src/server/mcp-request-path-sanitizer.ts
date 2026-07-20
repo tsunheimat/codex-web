@@ -1,5 +1,5 @@
 import path from "node:path";
-import { resolveBoundedDirectory } from "./workspace-files";
+import { resolveBoundedDirectory, WorkspacePathError } from "./workspace-files";
 
 const SUPPORTED_METHODS = new Set(["thread/start", "thread/resume"]);
 const SUPPORTED_ENVELOPE_TYPES = new Set([
@@ -88,16 +88,19 @@ function sanitizeNode(
 
     if (key === "cwd" && typeof value === "string") {
       const expanded = expandTildePath(value, homeDir);
-      const bounded =
-        browseRoot && path.isAbsolute(expanded)
-          ? resolveBoundedDirectory(expanded, browseRoot, key)
-          : expanded;
+      if (browseRoot && !path.isAbsolute(expanded)) {
+        throw new WorkspacePathError(
+          "cwd must be absolute when CODEX_WEBUI_BROWSE_ROOT is configured",
+          403,
+        );
+      }
+      const bounded = browseRoot
+        ? resolveBoundedDirectory(expanded, browseRoot, key)
+        : expanded;
       if (bounded !== value) {
         changes.push({ key, before: value, after: bounded });
         record[key] = bounded;
       }
-      // Other relative cwd values are deliberately preserved so app-server
-      // remains the validation authority instead of the bridge guessing.
       continue;
     }
 

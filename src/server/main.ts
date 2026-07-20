@@ -17,7 +17,11 @@ import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
 import { cacheControlForResponse } from "./cache-policy";
-import { sanitizeRendererInvokeMcpRequestPaths } from "./mcp-request-path-sanitizer";
+import {
+  invokeRendererRequest,
+  rendererInvokeErrorMessage,
+  type RendererInvokeMessage,
+} from "./ipc-renderer-invoke";
 import {
   parseReliableBridgeHello,
   ReliableBridgeCapacity,
@@ -44,13 +48,7 @@ type RendererToMainMessage =
       type: "renderer-bridge-ready";
       currentThreadId: string | null;
     }
-  | {
-      type: "ipc-renderer-invoke";
-      requestId: string;
-      channel: string;
-      args: unknown[];
-      sourceUrl: string;
-    }
+  | RendererInvokeMessage
   | {
       type: "ipc-renderer-send";
       channel: string;
@@ -175,25 +173,6 @@ function errorMessage(error: unknown): string {
     return error.stack ?? error.message;
   }
   return String(error);
-}
-
-function sanitizeOutboundMcpRequest(
-  message: RendererToMainMessage,
-  browseRoot: string,
-): void {
-  const result = sanitizeRendererInvokeMcpRequestPaths(
-    message,
-    os.homedir(),
-    browseRoot,
-  );
-  if (!result) {
-    return;
-  }
-  for (const change of result.changes) {
-    console.log(
-      `[mcp-request-sanitizer] ${result.method} ${change.key}: ${JSON.stringify(change.before)} -> ${change.after === null ? "dropped" : JSON.stringify(change.after)}`,
-    );
-  }
 }
 
 function ensureElectronLikeProcessContext(): void {
@@ -581,22 +560,24 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     }
 
     if (message.type === "ipc-renderer-invoke") {
-      const { channel, requestId, args } = message;
+      const { requestId } = message;
       Promise.resolve()
-        .then(() => {
-          sanitizeOutboundMcpRequest(
+        .then(() =>
+          invokeRendererRequest(
             message,
             workspaceFileAuthority.browseRoot,
-          );
-          return (
-            bridgeState.handleRendererInvoke?.(channel, args) ??
-            Promise.reject(
-              new Error(
-                `[ipc-bridge] no ipcMain.handle for channel ${channel}`,
-              ),
-            )
-          );
-        })
+            async (sanitizedChannel, sanitizedArgs) =>
+              await (bridgeState.handleRendererInvoke?.(
+                sanitizedChannel,
+                sanitizedArgs,
+              ) ??
+                Promise.reject(
+                  new Error(
+                    `[ipc-bridge] no ipcMain.handle for channel ${sanitizedChannel}`,
+                  ),
+                )),
+          ),
+        )
         .then((result) => {
           session.send({
             type: "ipc-renderer-invoke-result",
@@ -610,7 +591,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
             type: "ipc-renderer-invoke-result",
             requestId,
             ok: false,
-            errorMessage: errorMessage(error),
+            errorMessage: rendererInvokeErrorMessage(error),
           });
         });
     }

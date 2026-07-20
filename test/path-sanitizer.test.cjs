@@ -44,6 +44,35 @@ test("drops invalid arrays deliberately but preserves non-home-relative cwd", ()
   assert.deepEqual(envelope.request.params.sandbox.writableRoots, []);
 });
 
+test("rejects every relative cwd when browse authority is configured", async (t) => {
+  const temporaryRoot = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "codex-web-relative-cwd-sanitizer-"),
+  );
+  const browseRoot = path.join(temporaryRoot, "workspace");
+  await fsp.mkdir(browseRoot);
+  t.after(() => fsp.rm(temporaryRoot, { recursive: true, force: true }));
+
+  for (const [type, method, cwd] of [
+    ["mcp-request", "thread/start", "relative/repo"],
+    ["mcp-request", "thread/resume", "../outside"],
+    ["thread-prewarm-start", "thread/start", "."],
+  ]) {
+    assert.throws(
+      () =>
+        sanitizeMcpRequestPaths(
+          request(method, { cwd }, type),
+          HOME,
+          browseRoot,
+        ),
+      {
+        name: "WorkspacePathError",
+        message:
+          "cwd must be absolute when CODEX_WEBUI_BROWSE_ROOT is configured",
+      },
+    );
+  }
+});
+
 test("covers prewarm envelopes and ignores unrelated methods and text", () => {
   const prewarm = request(
     "thread/start",

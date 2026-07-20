@@ -103,10 +103,18 @@ export async function registerWorkspaceFileRoutes(
     try {
       const requestedPath = workspacePathFromAtFsUrl(request.raw.url ?? "");
       const file = authority.resolveAllowedFile(requestedPath);
-      return reply
+      const contentType = contentTypeForWorkspaceFile(file.downloadName);
+      reply
+        .header("content-security-policy", "sandbox; default-src 'none'")
         .header("x-content-type-options", "nosniff")
-        .type(contentTypeForWorkspaceFile(file.downloadName))
-        .send(createReadStream(file.path));
+        .type(contentType);
+      if (contentType === "application/octet-stream") {
+        reply.header(
+          "content-disposition",
+          attachmentContentDisposition(file.downloadName),
+        );
+      }
+      return reply.send(createReadStream(file.path));
     } catch {
       // Static file authority is intentionally fail-closed without revealing
       // which host paths exist outside the configured roots.
