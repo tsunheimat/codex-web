@@ -1,0 +1,28 @@
+--- a/webview/assets/app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js
++++ b/webview/assets/app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js
+@@ -41684,7 +41684,7 @@
+       );
+   return (
+     a.forEach((n) => {
+-      if (l ? t.has(n.model) : !n.hidden) {
++      if (!n.hidden) {
+         let t = i
+             ? n.supportedReasoningEfforts
+             : n.supportedReasoningEfforts.filter(
+@@ -41958,13 +41958,13 @@
+   userSavedReasoningEffort: t,
+   listModelsData: n,
+ }) {
+-  let r = e ? Dv(n?.models, e) : (n?.defaultModel ?? Dv(n?.models, `gpt-5.5`)),
++  let r = e ? Dv(n?.models, e) : (n?.defaultModel ?? n?.models[0] ?? null),
+     i = r?.supportedReasoningEfforts?.map((e) => e.reasoningEffort),
+     a = t != null && i != null && i.includes(t) ? t : r?.defaultReasoningEffort;
+   return {
+-    model: r ? r.model : (e ?? `gpt-5.5`),
++    model: r?.model ?? e ?? null,
+     reasoningEffort:
+-      a ?? t ?? n?.defaultModel?.defaultReasoningEffort ?? `medium`,
++      a ?? t ?? n?.defaultModel?.defaultReasoningEffort ?? null,
+     profile: null,
+     isLoading: !1,
+   };
