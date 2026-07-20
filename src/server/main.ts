@@ -32,6 +32,9 @@ type ServerOptions = {
 
 type RendererToMainMessage =
   | {
+      type: "renderer-bridge-ready";
+    }
+  | {
       type: "ipc-renderer-invoke";
       requestId: string;
       channel: string;
@@ -297,6 +300,92 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     string,
     ReliableBridgeSession<RendererToMainMessage, MainToRendererMessage>
   >();
+  const pageSessionsNeedingRecovery = new Set<string>();
+  const pageRecoveryPendingTurns = new Map<string, Set<string>>();
+  const rendererReadySessions = new Set<string>();
+  const activeTurns = new Set<string>();
+  let hasAcceptedReadyPageSession = false;
+
+  function turnKey(value: unknown): string | null {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const notification = value as {
+      params?: { threadId?: unknown; turn?: { id?: unknown } };
+    };
+    const threadId = notification.params?.threadId;
+    const turnId = notification.params?.turn?.id;
+    return typeof threadId === "string" && typeof turnId === "string"
+      ? `${threadId}:${turnId}`
+      : null;
+  }
+
+  function sendRendererHistoryRecovery(
+    session: ReliableBridgeSession<
+      RendererToMainMessage,
+      MainToRendererMessage
+    >,
+  ): void {
+    pageSessionsNeedingRecovery.delete(session.connectionId);
+    pageRecoveryPendingTurns.delete(session.connectionId);
+    // The official renderer already has a loss-recovery path for a
+    // WebSocket-backed host. A fresh Browser execution context has the same
+    // state gap even though the server-owned local app-server remains stdio,
+    // so enter that renderer-only recovery path after its IPC listener is
+    // ready. This re-reads/resumes official app-server thread state; it does
+    // not replay the retired page transport or restart the runtime.
+    session.send({
+      type: "ipc-main-event",
+      channel: "codex_desktop:message-for-view",
+      args: [
+        {
+          type: "codex-app-server-connection-changed",
+          error: null,
+          hostId: "local",
+          progress: null,
+          state: "connected",
+          transport: "websocket",
+        },
+      ],
+    });
+  }
+
+  function recordRuntimeTurnLifecycle(message: MainToRendererMessage): void {
+    if (
+      message.type !== "ipc-main-event" ||
+      message.channel !== "codex_desktop:message-for-view"
+    ) {
+      return;
+    }
+    const value = message.args[0] as
+      | { method?: unknown; type?: unknown }
+      | undefined;
+    if (value?.type !== "mcp-notification") {
+      return;
+    }
+    const key = turnKey(value);
+    if (!key) {
+      return;
+    }
+    if (value.method === "turn/started") {
+      activeTurns.add(key);
+      return;
+    }
+    if (value.method !== "turn/completed") {
+      return;
+    }
+    activeTurns.delete(key);
+    for (const [connectionId, pendingTurns] of pageRecoveryPendingTurns) {
+      pendingTurns.delete(key);
+      if (pendingTurns.size !== 0 || !rendererReadySessions.has(connectionId)) {
+        continue;
+      }
+      const session = sessions.get(connectionId);
+      if (session) {
+        sendRendererHistoryRecovery(session);
+      }
+    }
+  }
 
   app.addHook("onSend", async (request, reply) => {
     if (request.method === "GET" || request.method === "HEAD") {
@@ -389,6 +478,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   });
 
   bridgeState.broadcastToRenderer = (message: MainToRendererMessage): void => {
+    recordRuntimeTurnLifecycle(message);
     for (const session of sessions.values()) {
       session.send(message);
     }
@@ -439,6 +529,9 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
           capacity: bridgeCapacity,
           onDispose: () => {
             sessions.delete(hello.connectionId);
+            pageSessionsNeedingRecovery.delete(hello.connectionId);
+            pageRecoveryPendingTurns.delete(hello.connectionId);
+            rendererReadySessions.delete(hello.connectionId);
             bridgeCapacity.releaseSession(hello.connectionId);
           },
           onMessage: (message) => handleRendererMessage(session!, message),
@@ -456,6 +549,35 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     >,
     message: RendererToMainMessage,
   ): void {
+    if (message.type === "renderer-bridge-ready") {
+      if (rendererReadySessions.has(session.connectionId)) {
+        return;
+      }
+      const replacesReadyPage = hasAcceptedReadyPageSession;
+      // A raw fresh handshake still consumes the Phase 1 retained-session
+      // capacity. Only the official renderer's listener-ready signal proves
+      // that this is the new Desktop-window page, at which point its prior
+      // page-scoped reliable buffer can be retired safely.
+      for (const connectionId of [...rendererReadySessions]) {
+        sessions.get(connectionId)?.dispose("renderer page replaced");
+      }
+      rendererReadySessions.add(session.connectionId);
+      if (!replacesReadyPage) {
+        hasAcceptedReadyPageSession = true;
+        return;
+      }
+      pageSessionsNeedingRecovery.add(session.connectionId);
+      pageRecoveryPendingTurns.set(
+        session.connectionId,
+        new Set(activeTurns),
+      );
+      if ((pageRecoveryPendingTurns.get(session.connectionId)?.size ?? 0) > 0) {
+        return;
+      }
+      sendRendererHistoryRecovery(session);
+      return;
+    }
+
     if (message.type === "ipc-renderer-send") {
       bridgeState.handleRendererSend?.(message.channel, message.args);
       return;

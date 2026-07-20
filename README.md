@@ -120,6 +120,25 @@ some parts of the desktop experience are not wired up yet:
 - git worker integration
 - whatever else people find and file issues for
 
+## browser lifecycle test
+
+The browser lifecycle regression test drives the patched official Desktop
+renderer in Chromium through a same-page WebSocket reconnect, a hard refresh,
+and a full browser close/reopen. It starts an isolated Codex runtime and a local
+deterministic Responses provider; it does not use the host's Codex home,
+credentials, configuration, workspace, or a real model provider.
+
+Install the disposable Playwright Chromium build once, then run the test on a
+Linux host with `xvfb-run` available:
+
+```bash
+npm run test:browser:install
+npm run test:browser
+```
+
+The test uses ordinary loopback HTTP, fresh browser profiles, and temporary
+runtime directories, and fails if its child processes survive teardown.
+
 ## issues welcome
 
 if something is broken, missing, or rough around the edges, please file an

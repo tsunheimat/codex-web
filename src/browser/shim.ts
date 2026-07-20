@@ -15,6 +15,9 @@ type IpcListener = (event: unknown, ...args: unknown[]) => void;
 
 type RendererToMainMessage =
   | {
+      type: "renderer-bridge-ready";
+    }
+  | {
       type: "ipc-renderer-invoke";
       requestId: string;
       channel: string;
@@ -214,6 +217,7 @@ const pendingDirectoryEntries = new Map<
 >();
 const rendererListeners = new Map<string, Set<IpcListener>>();
 const reportedRendererListenerErrors = new Set<string>();
+let rendererBridgeReadySent = false;
 
 function unimplemented(method: string): never {
   debugger;
@@ -545,6 +549,13 @@ function addIpcListener(channel: string, listener: IpcListener): void {
   const listeners = rendererListeners.get(channel) ?? new Set<IpcListener>();
   listeners.add(listener);
   rendererListeners.set(channel, listeners);
+  if (
+    channel === "codex_desktop:message-for-view" &&
+    !rendererBridgeReadySent
+  ) {
+    rendererBridgeReadySent = true;
+    enqueueMessage({ type: "renderer-bridge-ready" });
+  }
 }
 
 function shouldCloseSidebarForMemoryPath(path: string): boolean {
