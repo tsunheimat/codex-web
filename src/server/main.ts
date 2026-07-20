@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs as parseCliArgs } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
@@ -99,6 +99,10 @@ type IpcMainBridgeState = {
   broadcastToRenderer?: (message: MainToRendererMessage) => void;
   handleRendererInvoke?: (channel: string, args: unknown[]) => Promise<unknown>;
   handleRendererSend?: (channel: string, args: unknown[]) => void;
+};
+
+type ServerCleanupAuthority = {
+  cleanup: () => Promise<void>;
 };
 
 function printUsage(): void {
@@ -228,6 +232,106 @@ function sendBridgeReset(socket: WebSocket, reason: string): void {
   socket.close(1008, reason);
 }
 
+function createServerCleanupAuthority({
+  app,
+  bridgeState,
+  sessions,
+  websocketServer,
+  workspaceFileAuthority,
+}: {
+  app: FastifyInstance;
+  bridgeState: IpcMainBridgeState;
+  sessions: Map<
+    string,
+    ReliableBridgeSession<RendererToMainMessage, MainToRendererMessage>
+  >;
+  websocketServer: WebSocketServer;
+  workspaceFileAuthority: WorkspaceFileAuthority;
+}): ServerCleanupAuthority {
+  let cleanupPromise: Promise<void> | null = null;
+  let exitPromise: Promise<void> | null = null;
+
+  const removeSignalHandlers = (): void => {
+    process.off("SIGINT", handleSignal);
+    process.off("SIGTERM", handleSignal);
+  };
+
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) {
+      return cleanupPromise;
+    }
+
+    cleanupPromise = (async () => {
+      const cleanupErrors: unknown[] = [];
+      for (const session of [...sessions.values()]) {
+        try {
+          session.dispose("server shutdown");
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      for (const client of websocketServer.clients) {
+        try {
+          client.terminate();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+
+      try {
+        await new Promise<void>((resolve) => {
+          websocketServer.close((error) => {
+            if (error) cleanupErrors.push(error);
+            resolve();
+          });
+        });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+
+      try {
+        await app.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+
+      bridgeState.broadcastToRenderer = undefined;
+      bridgeState.handleRendererInvoke = undefined;
+      bridgeState.handleRendererSend = undefined;
+
+      try {
+        await workspaceFileAuthority.cleanup();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+
+      removeSignalHandlers();
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(cleanupErrors, "Server cleanup failed");
+      }
+    })();
+    return cleanupPromise;
+  };
+
+  const exitAfterCleanup = (exitCode: number): void => {
+    if (exitPromise) {
+      return;
+    }
+    exitPromise = cleanup()
+      .catch((error) => {
+        console.error(errorMessage(error));
+        exitCode = 1;
+      })
+      .then(() => process.exit(exitCode));
+  };
+
+  const handleSignal = (): void => exitAfterCleanup(0);
+  process.on("SIGINT", handleSignal);
+  process.on("SIGTERM", handleSignal);
+
+  return { cleanup };
+}
+
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const configuredBrowseRoot =
     process.env.CODEX_WEBUI_BROWSE_ROOT?.trim() || os.homedir();
@@ -242,6 +346,27 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     string,
     ReliableBridgeSession<RendererToMainMessage, MainToRendererMessage>
   >();
+  const cleanupAuthority = createServerCleanupAuthority({
+    app,
+    bridgeState,
+    sessions,
+    websocketServer,
+    workspaceFileAuthority,
+  });
+  const startupStep = async <T>(
+    operation: () => T | Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await operation();
+    } catch (startupError) {
+      try {
+        await cleanupAuthority.cleanup();
+      } catch (cleanupError) {
+        console.error(errorMessage(cleanupError));
+      }
+      throw startupError;
+    }
+  };
 
   function sendRendererHistoryRecovery(
     session: ReliableBridgeSession<
@@ -300,12 +425,18 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     }
   });
 
-  await registerWorkspaceFileRoutes(app, workspaceFileAuthority);
+  await startupStep(() =>
+    registerWorkspaceFileRoutes(app, workspaceFileAuthority, {
+      cleanupOnClose: false,
+    }),
+  );
 
-  await app.register(fastifyStatic, {
-    root: path.resolve(__dirname, "../../scratch/asar/webview"),
-    prefix: "/",
-  });
+  await startupStep(() =>
+    app.register(fastifyStatic, {
+      root: path.resolve(__dirname, "../../scratch/asar/webview"),
+      prefix: "/",
+    }),
+  );
 
   app.get("/", async (_request, reply) => {
     return reply.sendFile("index.html");
@@ -485,60 +616,43 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     }
   }
 
-  await app.listen({ host: options.host, port: options.port });
+  await startupStep(() =>
+    app.listen({ host: options.host, port: options.port }),
+  );
   console.log(`IPC bridge listening at ws://${options.host}:${options.port}`);
   console.log(`Workspace browse root: ${workspaceFileAuthority.browseRoot}`);
 
-  let shuttingDown = false;
-  const shutDown = (): void => {
-    if (shuttingDown) {
-      return;
+  await startupStep(async () => {
+    ensureElectronLikeProcessContext();
+    installModuleAliasHook();
+
+    const packageJson = JSON.parse(
+      await fs.readFile(
+        path.resolve(__dirname, "../../scratch/asar/package.json"),
+        "utf8",
+      ),
+    );
+
+    globalThis.__CODEX_SHIM_VALUES__ = {
+      version: packageJson.version,
+    };
+
+    const matches = await glob("../../scratch/asar/.vite/build/main-*.js", {
+      nodir: true,
+      cwd: __dirname,
+    });
+
+    if (matches.length === 0) {
+      throw new Error("no main bundle found");
     }
-    shuttingDown = true;
-    for (const session of sessions.values()) {
-      session.dispose("server shutdown");
+
+    if (matches.length > 1) {
+      throw new Error("multiple main bundles found");
     }
-    for (const client of websocketServer.clients) {
-      client.terminate();
-    }
-    websocketServer.close();
-    void app
-      .close()
-      .catch((error) => console.error(errorMessage(error)))
-      .finally(() => process.exit(0));
-  };
-  process.once("SIGINT", shutDown);
-  process.once("SIGTERM", shutDown);
 
-  ensureElectronLikeProcessContext();
-  installModuleAliasHook();
-
-  const packageJson = JSON.parse(
-    await fs.readFile(
-      path.resolve(__dirname, "../../scratch/asar/package.json"),
-      "utf8",
-    ),
-  );
-
-  globalThis.__CODEX_SHIM_VALUES__ = {
-    version: packageJson.version,
-  };
-
-  const matches = await glob("../../scratch/asar/.vite/build/main-*.js", {
-    nodir: true,
-    cwd: __dirname,
+    const module = require(matches[0]!);
+    await Promise.resolve(module.runMainAppStartup());
   });
-
-  if (matches.length === 0) {
-    throw new Error("no main bundle found");
-  }
-
-  if (matches.length > 1) {
-    throw new Error("multiple main bundles found");
-  }
-
-  const module = require(matches[0]!);
-  module.runMainAppStartup();
 }
 
 async function main(args: string[]) {
@@ -547,4 +661,7 @@ async function main(args: string[]) {
   await startIpcBridgeServer(options);
 }
 
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch((error) => {
+  console.error(errorMessage(error));
+  process.exit(1);
+});

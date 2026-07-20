@@ -31,10 +31,13 @@ export function workspacePathFromAtFsUrl(rawUrl: string): string {
 export async function registerWorkspaceFileRoutes(
   app: FastifyInstance,
   authority: WorkspaceFileAuthority,
+  options: { cleanupOnClose?: boolean } = {},
 ): Promise<void> {
-  app.addHook("onClose", async () => {
-    await authority.cleanup();
-  });
+  if (options.cleanupOnClose !== false) {
+    app.addHook("onClose", async () => {
+      await authority.cleanup();
+    });
+  }
   await app.register(fastifyMultipart, {
     limits: WORKSPACE_UPLOAD_LIMITS,
   });
