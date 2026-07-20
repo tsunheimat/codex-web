@@ -553,16 +553,12 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       if (rendererReadySessions.has(session.connectionId)) {
         return;
       }
-      const replacesReadyPage = hasAcceptedReadyPageSession;
-      // A raw fresh handshake still consumes the Phase 1 retained-session
-      // capacity. Only the official renderer's listener-ready signal proves
-      // that this is the new Desktop-window page, at which point its prior
-      // page-scoped reliable buffer can be retired safely.
-      for (const connectionId of [...rendererReadySessions]) {
-        sessions.get(connectionId)?.dispose("renderer page replaced");
-      }
+      const requiresHistoryRecovery = hasAcceptedReadyPageSession;
+      // Readiness applies only to this page-scoped transport. Other ready
+      // renderer sessions may be live Browser tabs and must remain retained
+      // under the existing process-wide session and byte bounds.
       rendererReadySessions.add(session.connectionId);
-      if (!replacesReadyPage) {
+      if (!requiresHistoryRecovery) {
         hasAcceptedReadyPageSession = true;
         return;
       }

@@ -49,6 +49,48 @@ async function handshake(socket, connectionId, serverEpoch) {
   return ready;
 }
 
+async function sendBridgeData(socket, id, ack, message) {
+  const accepted = nextFrame(
+    socket,
+    (frame) => frame.type === "bridge-ack" && frame.ack === id,
+  );
+  socket.send(
+    JSON.stringify({
+      type: "bridge-data",
+      id,
+      ack,
+      message,
+    }),
+  );
+  await accepted;
+}
+
+async function requestWorkspaceDirectories(socket, id, ack, requestId) {
+  const result = nextFrame(
+    socket,
+    (frame) =>
+      frame.type === "bridge-data" && frame.message?.requestId === requestId,
+  );
+  socket.send(
+    JSON.stringify({
+      type: "bridge-data",
+      id,
+      ack,
+      message: {
+        type: "workspace-directory-entries-request",
+        requestId,
+        directoryPath: process.cwd(),
+        directoriesOnly: true,
+      },
+    }),
+  );
+  const resultFrame = await result;
+  assert.equal(resultFrame.message.ok, true);
+  assert.equal(resultFrame.message.result.directoryPath, process.cwd());
+  socket.send(JSON.stringify({ type: "bridge-ack", ack: resultFrame.id }));
+  return resultFrame;
+}
+
 async function main() {
   await assertCachePolicy("/", "no-cache");
   await assertCachePolicy("/assets/preload.js", "no-cache");
@@ -140,7 +182,72 @@ async function main() {
   assert.equal((await reset).reason, "backend restarted");
   stale.terminate();
 
-  console.log("Codex Web local HTTP/reliable-bridge runtime smoke passed.");
+  const rendererA = await connect();
+  const rendererAReady = await handshake(
+    rendererA,
+    `${connectionId}-renderer-a`,
+    null,
+  );
+  const rendererAResets = [];
+  rendererA.on("message", (rawData) => {
+    const frame = JSON.parse(String(rawData));
+    if (frame.type === "bridge-reset") rendererAResets.push(frame.reason);
+  });
+  await sendBridgeData(rendererA, 1, 0, {
+    type: "renderer-bridge-ready",
+  });
+
+  const rendererB = await connect();
+  const rendererBReady = await handshake(
+    rendererB,
+    `${connectionId}-renderer-b`,
+    null,
+  );
+  assert.equal(rendererBReady.serverEpoch, rendererAReady.serverEpoch);
+  const rendererBResets = [];
+  rendererB.on("message", (rawData) => {
+    const frame = JSON.parse(String(rawData));
+    if (frame.type === "bridge-reset") rendererBResets.push(frame.reason);
+  });
+  const rendererBRecovery = nextFrame(
+    rendererB,
+    (frame) =>
+      frame.type === "bridge-data" &&
+      frame.message?.type === "ipc-main-event" &&
+      frame.message?.args?.[0]?.type ===
+        "codex-app-server-connection-changed",
+  );
+  await sendBridgeData(rendererB, 1, 0, {
+    type: "renderer-bridge-ready",
+  });
+  const recoveryFrame = await rendererBRecovery;
+
+  assert.equal(rendererA.readyState, WebSocket.OPEN);
+  assert.equal(rendererB.readyState, WebSocket.OPEN);
+  const rendererAResult = await requestWorkspaceDirectories(
+    rendererA,
+    2,
+    0,
+    "runtime-smoke-renderer-a-directory",
+  );
+  const rendererBResult = await requestWorkspaceDirectories(
+    rendererB,
+    2,
+    recoveryFrame.id,
+    "runtime-smoke-renderer-b-directory",
+  );
+  assert.equal(rendererAResult.id, 1);
+  assert.equal(rendererBResult.id, recoveryFrame.id + 1);
+  assert.deepEqual(rendererAResets, []);
+  assert.deepEqual(rendererBResets, []);
+  assert.equal(rendererA.readyState, WebSocket.OPEN);
+  assert.equal(rendererB.readyState, WebSocket.OPEN);
+  rendererA.send(JSON.stringify({ type: "bridge-disconnect" }));
+  rendererB.send(JSON.stringify({ type: "bridge-disconnect" }));
+
+  console.log(
+    "Codex Web local HTTP/reliable-bridge and multi-renderer runtime smoke passed.",
+  );
 }
 
 main().catch((error) => {
