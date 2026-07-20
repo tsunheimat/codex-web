@@ -151,6 +151,36 @@ async function assertPortClosed(port) {
   });
 }
 
+async function verifyAndRemoveFixtureRoot(
+  root,
+  verifyCleanliness,
+  removeRoot = (fixtureRoot) =>
+    fsp.rm(fixtureRoot, { recursive: true, force: true }),
+) {
+  let verificationFailed = false;
+  let verificationError;
+  try {
+    await verifyCleanliness();
+  } catch (error) {
+    verificationFailed = true;
+    verificationError = error;
+  } finally {
+    try {
+      await removeRoot(root);
+    } catch (removalError) {
+      if (verificationFailed) {
+        throw new AggregateError(
+          [verificationError, removalError],
+          `Fixture verification and root removal both failed for ${root}`,
+        );
+      }
+      throw removalError;
+    }
+  }
+
+  if (verificationFailed) throw verificationError;
+}
+
 async function createIsolatedRun(t, { codexCliPath, port }) {
   const root = await fsp.mkdtemp(
     path.join(os.tmpdir(), "codex-web-server-cleanup-test-"),
@@ -186,22 +216,23 @@ async function createIsolatedRun(t, { codexCliPath, port }) {
     ),
   );
 
-  t.after(async () => {
-    if (processExists(run.child.pid)) {
-      run.child.kill("SIGKILL");
-      await waitForExit(run).catch(() => undefined);
-    }
-    const leftoverProcesses = await waitFor(
-      "run-owned process teardown",
-      async () => {
-        const pids = await markedProcessIds(runId);
-        return pids.length === 0 ? [] : false;
-      },
-    );
-    assert.deepEqual(leftoverProcesses, []);
-    assert.deepEqual(await runtimeRoots(temporaryDirectory), []);
-    await fsp.rm(root, { recursive: true, force: true });
-  });
+  t.after(() =>
+    verifyAndRemoveFixtureRoot(root, async () => {
+      if (processExists(run.child.pid)) {
+        run.child.kill("SIGKILL");
+        await waitForExit(run).catch(() => undefined);
+      }
+      const leftoverProcesses = await waitFor(
+        "run-owned process teardown",
+        async () => {
+          const pids = await markedProcessIds(runId);
+          return pids.length === 0 ? [] : false;
+        },
+      );
+      assert.deepEqual(leftoverProcesses, []);
+      assert.deepEqual(await runtimeRoots(temporaryDirectory), []);
+    }),
+  );
 
   return { ...run, port, runId, temporaryDirectory };
 }
@@ -215,6 +246,61 @@ async function assertRunClean(run) {
   assert.deepEqual(await markedProcessIds(run.runId), []);
   await assertPortClosed(run.port);
 }
+
+test("failed teardown verification still removes its exact fixture root", async (t) => {
+  const root = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "codex-web-server-cleanup-test-"),
+  );
+  const otherRoot = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "codex-web-server-cleanup-test-"),
+  );
+  t.after(() =>
+    Promise.all(
+      [root, otherRoot].map((fixtureRoot) =>
+        fsp.rm(fixtureRoot, { recursive: true, force: true }),
+      ),
+    ),
+  );
+  await fsp.writeFile(path.join(root, "verification-sentinel"), "owned");
+  const verificationError = new Error("deliberate teardown verification failure");
+
+  await assert.rejects(
+    verifyAndRemoveFixtureRoot(root, async () => {
+      throw verificationError;
+    }),
+    (error) => error === verificationError,
+  );
+
+  await assert.rejects(fsp.access(root), { code: "ENOENT" });
+  await fsp.access(otherRoot);
+});
+
+test("teardown reports verification and root-removal failures together", async () => {
+  const root = path.join(
+    os.tmpdir(),
+    `codex-web-server-cleanup-test-${randomUUID()}`,
+  );
+  const verificationError = new Error("deliberate verification failure");
+  const removalError = new Error("deliberate root removal failure");
+
+  await assert.rejects(
+    verifyAndRemoveFixtureRoot(
+      root,
+      async () => {
+        throw verificationError;
+      },
+      async () => {
+        throw removalError;
+      },
+    ),
+    (error) => {
+      assert(error instanceof AggregateError);
+      assert.deepEqual(error.errors, [verificationError, removalError]);
+      assert.match(error.message, /verification and root removal both failed/i);
+      return true;
+    },
+  );
+});
 
 test("invalid Desktop CLI startup failure exits nonzero and cleans server ownership", async (t) => {
   const port = await unusedLoopbackPort();
