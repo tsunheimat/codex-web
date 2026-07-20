@@ -18,9 +18,10 @@ import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
 import { cacheControlForResponse } from "./cache-policy";
-import { sanitizeMcpRequestPaths } from "./mcp-request-path-sanitizer";
+import { sanitizeRendererInvokeMcpRequestPaths } from "./mcp-request-path-sanitizer";
 import {
   parseReliableBridgeHello,
+  ReliableBridgeCapacity,
   ReliableBridgeSession,
 } from "./reliable-bridge";
 
@@ -196,17 +197,15 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-function sanitizeOutboundMcpRequestArgs(args: unknown[]): void {
-  for (const argument of args) {
-    const result = sanitizeMcpRequestPaths(argument, os.homedir());
-    if (!result) {
-      continue;
-    }
-    for (const change of result.changes) {
-      console.log(
-        `[mcp-request-sanitizer] ${result.method} ${change.key}: ${JSON.stringify(change.before)} -> ${change.after === null ? "dropped" : JSON.stringify(change.after)}`,
-      );
-    }
+function sanitizeOutboundMcpRequest(message: RendererToMainMessage): void {
+  const result = sanitizeRendererInvokeMcpRequestPaths(message, os.homedir());
+  if (!result) {
+    return;
+  }
+  for (const change of result.changes) {
+    console.log(
+      `[mcp-request-sanitizer] ${result.method} ${change.key}: ${JSON.stringify(change.before)} -> ${change.after === null ? "dropped" : JSON.stringify(change.after)}`,
+    );
   }
 }
 
@@ -293,6 +292,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const app = Fastify({ logger: false });
   const websocketServer = new WebSocketServer({ noServer: true });
   const serverEpoch = randomUUID();
+  const bridgeCapacity = new ReliableBridgeCapacity();
   const sessions = new Map<
     string,
     ReliableBridgeSession<RendererToMainMessage, MainToRendererMessage>
@@ -429,10 +429,18 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
           sendBridgeReset(socket, "reconnection session expired");
           return;
         }
+        if (!bridgeCapacity.retainSession(hello.connectionId)) {
+          sendBridgeReset(socket, "reliable bridge session capacity exceeded");
+          return;
+        }
         session = new ReliableBridgeSession({
           connectionId: hello.connectionId,
           serverEpoch,
-          onDispose: () => sessions.delete(hello.connectionId),
+          capacity: bridgeCapacity,
+          onDispose: () => {
+            sessions.delete(hello.connectionId);
+            bridgeCapacity.releaseSession(hello.connectionId);
+          },
           onMessage: (message) => handleRendererMessage(session!, message),
         });
         sessions.set(hello.connectionId, session);
@@ -449,7 +457,6 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     message: RendererToMainMessage,
   ): void {
     if (message.type === "ipc-renderer-send") {
-      sanitizeOutboundMcpRequestArgs(message.args);
       bridgeState.handleRendererSend?.(message.channel, message.args);
       return;
     }
@@ -478,7 +485,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     if (message.type === "ipc-renderer-invoke") {
       const { channel, requestId, args } = message;
-      sanitizeOutboundMcpRequestArgs(args);
+      sanitizeOutboundMcpRequest(message);
       Promise.resolve(
         bridgeState.handleRendererInvoke?.(channel, args) ??
           Promise.reject(

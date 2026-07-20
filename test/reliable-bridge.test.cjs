@@ -3,6 +3,7 @@ const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
   parseReliableBridgeHello,
+  ReliableBridgeCapacity,
   ReliableBridgeSession,
 } = require("../src/server/reliable-bridge.js");
 
@@ -131,6 +132,78 @@ test("uses acknowledgement-driven in-flight and total buffer bounds", () => {
   bounded.session.attach(socket);
   bounded.session.send({ tooLarge: true });
   assert.equal(bounded.disposeReason(), "reliable bridge buffer exceeded");
+});
+
+test("rejects new retained sessions at capacity but allows existing reconnects", () => {
+  const capacity = new ReliableBridgeCapacity();
+
+  for (let index = 0; index < 16; index += 1) {
+    assert.equal(capacity.retainSession(`page-${index}`), true);
+  }
+  assert.equal(capacity.retainedSessionCount, 16);
+  assert.equal(capacity.retainSession("page-0"), true);
+  assert.equal(capacity.retainedSessionCount, 16);
+  assert.equal(capacity.retainSession("page-16"), false);
+
+  capacity.releaseSession("page-0");
+  capacity.releaseSession("page-0");
+  assert.equal(capacity.retainSession("page-16"), true);
+  assert.equal(capacity.retainedSessionCount, 16);
+});
+
+test("defaults to a 128 MiB process-wide byte budget", () => {
+  const capacity = new ReliableBridgeCapacity();
+  const maxBytes = 128 * 1024 * 1024;
+
+  assert.equal(capacity.reserveBytes(maxBytes), true);
+  assert.equal(capacity.retainedUnackedBytes, maxBytes);
+  assert.equal(capacity.reserveBytes(1), false);
+  assert.equal(capacity.retainedUnackedBytes, maxBytes);
+  capacity.releaseBytes(maxBytes);
+  assert.equal(capacity.retainedUnackedBytes, 0);
+});
+
+test("enforces cross-session bytes and releases reservations exactly once", () => {
+  const payload = { value: "shared-capacity" };
+  const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
+  const capacity = new ReliableBridgeCapacity({
+    maxTotalUnackedBytes: payloadBytes,
+  });
+  const a = createSession([], {
+    connectionId: "page-a",
+    capacity,
+  });
+  const b = createSession([], {
+    connectionId: "page-b",
+    capacity,
+  });
+  const socketA = new FakeSocket();
+  const socketB = new FakeSocket();
+  a.session.attach(socketA);
+  b.session.attach(socketB);
+
+  a.session.send(payload);
+  assert.equal(capacity.retainedUnackedBytes, payloadBytes);
+  b.session.send(payload);
+  assert.equal(b.disposeReason(), "reliable bridge process buffer exceeded");
+  assert.equal(capacity.retainedUnackedBytes, payloadBytes);
+
+  socketA.receive({ type: "bridge-ack", ack: 1 });
+  socketA.receive({ type: "bridge-ack", ack: 1 });
+  assert.equal(capacity.retainedUnackedBytes, 0);
+
+  const c = createSession([], {
+    connectionId: "page-c",
+    capacity,
+  });
+  const socketC = new FakeSocket();
+  c.session.attach(socketC);
+  c.session.send(payload);
+  assert.equal(capacity.retainedUnackedBytes, payloadBytes);
+  c.session.dispose("done");
+  c.session.dispose("done again");
+  assert.equal(capacity.retainedUnackedBytes, 0);
+  a.session.dispose("done");
 });
 
 for (const frameType of ["bridge-ack", "bridge-replay-request"]) {

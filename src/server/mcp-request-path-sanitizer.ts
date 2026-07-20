@@ -1,6 +1,11 @@
 import path from "node:path";
 
 const SUPPORTED_METHODS = new Set(["thread/start", "thread/resume"]);
+const SUPPORTED_ENVELOPE_TYPES = new Set([
+  "mcp-request",
+  "thread-prewarm-start",
+]);
+const MCP_REQUEST_CHANNEL = "codex_desktop:message-from-view";
 const ABSOLUTE_PATH_ARRAY_KEYS = new Set([
   "runtimeWorkspaceRoots",
   "writableRoots",
@@ -111,6 +116,7 @@ export function sanitizeMcpRequestPaths(
   const request = envelope.request;
   if (
     typeof envelope.type !== "string" ||
+    !SUPPORTED_ENVELOPE_TYPES.has(envelope.type) ||
     typeof request !== "object" ||
     request === null ||
     typeof request.method !== "string" ||
@@ -124,4 +130,24 @@ export function sanitizeMcpRequestPaths(
   const changes: SanitizedPathChange[] = [];
   sanitizeNode(request.params, homeDir, changes);
   return changes.length > 0 ? { method: request.method, changes } : null;
+}
+
+/** Normalize only the single app-server envelope used by Desktop invoke IPC. */
+export function sanitizeRendererInvokeMcpRequestPaths(
+  message: unknown,
+  homeDir: string,
+): { method: string; changes: SanitizedPathChange[] } | null {
+  if (typeof message !== "object" || message === null) {
+    return null;
+  }
+  const candidate = message as Record<string, unknown>;
+  if (
+    candidate.type !== "ipc-renderer-invoke" ||
+    candidate.channel !== MCP_REQUEST_CHANNEL ||
+    !Array.isArray(candidate.args) ||
+    candidate.args.length !== 1
+  ) {
+    return null;
+  }
+  return sanitizeMcpRequestPaths(candidate.args[0], homeDir);
 }

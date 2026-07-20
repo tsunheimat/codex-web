@@ -5,8 +5,68 @@ export const RELIABLE_BRIDGE_PROTOCOL_VERSION = 2;
 const DEFAULT_GRACE_TIME_MS = 5 * 60 * 1_000;
 const DEFAULT_MAX_UNACKED_BYTES = 64 * 1024 * 1_024;
 const DEFAULT_MAX_IN_FLIGHT_BYTES = 256 * 1024;
+const DEFAULT_MAX_RETAINED_SESSIONS = 16;
+const DEFAULT_MAX_TOTAL_UNACKED_BYTES = 128 * 1024 * 1_024;
 const KEEPALIVE_INTERVAL_MS = 5_000;
 const SOCKET_TIMEOUT_MS = 20_000;
+
+type ReliableBridgeCapacityOptions = {
+  maxRetainedSessions?: number;
+  maxTotalUnackedBytes?: number;
+};
+
+/** Process-wide bounds shared by every retained reliable bridge session. */
+export class ReliableBridgeCapacity {
+  private readonly maxRetainedSessions: number;
+  private readonly maxTotalUnackedBytes: number;
+  private readonly retainedSessionIds = new Set<string>();
+  private totalUnackedBytes = 0;
+
+  constructor(options: ReliableBridgeCapacityOptions = {}) {
+    this.maxRetainedSessions =
+      options.maxRetainedSessions ?? DEFAULT_MAX_RETAINED_SESSIONS;
+    this.maxTotalUnackedBytes =
+      options.maxTotalUnackedBytes ?? DEFAULT_MAX_TOTAL_UNACKED_BYTES;
+  }
+
+  get retainedSessionCount(): number {
+    return this.retainedSessionIds.size;
+  }
+
+  get retainedUnackedBytes(): number {
+    return this.totalUnackedBytes;
+  }
+
+  retainSession(connectionId: string): boolean {
+    if (this.retainedSessionIds.has(connectionId)) {
+      return true;
+    }
+    if (this.retainedSessionIds.size >= this.maxRetainedSessions) {
+      return false;
+    }
+    this.retainedSessionIds.add(connectionId);
+    return true;
+  }
+
+  releaseSession(connectionId: string): void {
+    this.retainedSessionIds.delete(connectionId);
+  }
+
+  reserveBytes(byteLength: number): boolean {
+    if (this.totalUnackedBytes + byteLength > this.maxTotalUnackedBytes) {
+      return false;
+    }
+    this.totalUnackedBytes += byteLength;
+    return true;
+  }
+
+  releaseBytes(byteLength: number): void {
+    if (byteLength > this.totalUnackedBytes) {
+      throw new Error("reliable bridge capacity accounting underflow");
+    }
+    this.totalUnackedBytes -= byteLength;
+  }
+}
 
 export type ReliableBridgeHello = {
   type: "bridge-hello";
@@ -31,6 +91,7 @@ type OutgoingMessage<T> = {
 type ReliableBridgeSessionOptions<TIncoming> = {
   connectionId: string;
   serverEpoch: string;
+  capacity?: ReliableBridgeCapacity;
   graceTimeMs?: number;
   maxUnackedBytes?: number;
   maxInFlightBytes?: number;
@@ -48,6 +109,7 @@ export class ReliableBridgeSession<TIncoming, TOutgoing> {
   readonly serverEpoch: string;
 
   private readonly graceTimeMs: number;
+  private readonly capacity: ReliableBridgeCapacity | null;
   private readonly maxUnackedBytes: number;
   private readonly maxInFlightBytes: number;
   private readonly onDispose: (reason: string) => void;
@@ -67,6 +129,7 @@ export class ReliableBridgeSession<TIncoming, TOutgoing> {
   constructor(options: ReliableBridgeSessionOptions<TIncoming>) {
     this.connectionId = options.connectionId;
     this.serverEpoch = options.serverEpoch;
+    this.capacity = options.capacity ?? null;
     this.graceTimeMs = options.graceTimeMs ?? DEFAULT_GRACE_TIME_MS;
     this.maxUnackedBytes = options.maxUnackedBytes ?? DEFAULT_MAX_UNACKED_BYTES;
     this.maxInFlightBytes =
@@ -105,16 +168,20 @@ export class ReliableBridgeSession<TIncoming, TOutgoing> {
     }
 
     const byteLength = Buffer.byteLength(JSON.stringify(message));
+    if (this.outgoingUnackedBytes + byteLength > this.maxUnackedBytes) {
+      this.reset("reliable bridge buffer exceeded");
+      return;
+    }
+    if (this.capacity !== null && !this.capacity.reserveBytes(byteLength)) {
+      this.reset("reliable bridge process buffer exceeded");
+      return;
+    }
     this.outgoingUnacked.push({
       id: ++this.outgoingMessageId,
       message,
       byteLength,
     });
     this.outgoingUnackedBytes += byteLength;
-    if (this.outgoingUnackedBytes > this.maxUnackedBytes) {
-      this.reset("reliable bridge buffer exceeded");
-      return;
-    }
     this.pumpOutgoing();
   }
 
@@ -129,6 +196,7 @@ export class ReliableBridgeSession<TIncoming, TOutgoing> {
     this.socket = null;
     this.removeSocketListeners(socket);
     socket?.close(1000, reason);
+    this.capacity?.releaseBytes(this.outgoingUnackedBytes);
     this.outgoingUnacked = [];
     this.outgoingUnackedBytes = 0;
     this.onDispose(reason);
@@ -235,10 +303,12 @@ export class ReliableBridgeSession<TIncoming, TOutgoing> {
     const acknowledged = this.outgoingUnacked.filter(
       (message) => message.id <= ack,
     );
-    this.outgoingUnackedBytes -= acknowledged.reduce(
+    const acknowledgedByteLength = acknowledged.reduce(
       (total, message) => total + message.byteLength,
       0,
     );
+    this.outgoingUnackedBytes -= acknowledgedByteLength;
+    this.capacity?.releaseBytes(acknowledgedByteLength);
     this.outgoingUnacked = this.outgoingUnacked.filter(
       (message) => message.id > ack,
     );
