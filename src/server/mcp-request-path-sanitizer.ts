@@ -1,4 +1,5 @@
 import path from "node:path";
+import { resolveBoundedDirectory } from "./workspace-files";
 
 const SUPPORTED_METHODS = new Set(["thread/start", "thread/resume"]);
 const SUPPORTED_ENVELOPE_TYPES = new Set([
@@ -31,10 +32,11 @@ function sanitizeNode(
   node: unknown,
   homeDir: string,
   changes: SanitizedPathChange[],
+  browseRoot?: string,
 ): void {
   if (Array.isArray(node)) {
     for (const item of node) {
-      sanitizeNode(item, homeDir, changes);
+      sanitizeNode(item, homeDir, changes, browseRoot);
     }
     return;
   }
@@ -56,10 +58,13 @@ function sanitizeNode(
           changes.push({ key, before: entry, after: null });
           continue;
         }
-        if (expanded !== entry) {
-          changes.push({ key, before: entry, after: expanded });
+        const bounded = browseRoot
+          ? resolveBoundedDirectory(expanded, browseRoot, key)
+          : expanded;
+        if (bounded !== entry) {
+          changes.push({ key, before: entry, after: bounded });
         }
-        sanitized.push(expanded);
+        sanitized.push(bounded);
       }
 
       // A bad runtime override should become no override, not an explicit
@@ -83,16 +88,20 @@ function sanitizeNode(
 
     if (key === "cwd" && typeof value === "string") {
       const expanded = expandTildePath(value, homeDir);
-      if (expanded !== value) {
-        changes.push({ key, before: value, after: expanded });
-        record[key] = expanded;
+      const bounded =
+        browseRoot && path.isAbsolute(expanded)
+          ? resolveBoundedDirectory(expanded, browseRoot, key)
+          : expanded;
+      if (bounded !== value) {
+        changes.push({ key, before: value, after: bounded });
+        record[key] = bounded;
       }
       // Other relative cwd values are deliberately preserved so app-server
       // remains the validation authority instead of the bridge guessing.
       continue;
     }
 
-    sanitizeNode(value, homeDir, changes);
+    sanitizeNode(value, homeDir, changes, browseRoot);
   }
 }
 
@@ -108,6 +117,7 @@ type McpRequestEnvelope = {
 export function sanitizeMcpRequestPaths(
   argument: unknown,
   homeDir: string,
+  browseRoot?: string,
 ): { method: string; changes: SanitizedPathChange[] } | null {
   if (typeof argument !== "object" || argument === null) {
     return null;
@@ -128,7 +138,7 @@ export function sanitizeMcpRequestPaths(
   }
 
   const changes: SanitizedPathChange[] = [];
-  sanitizeNode(request.params, homeDir, changes);
+  sanitizeNode(request.params, homeDir, changes, browseRoot);
   return changes.length > 0 ? { method: request.method, changes } : null;
 }
 
@@ -136,6 +146,7 @@ export function sanitizeMcpRequestPaths(
 export function sanitizeRendererInvokeMcpRequestPaths(
   message: unknown,
   homeDir: string,
+  browseRoot?: string,
 ): { method: string; changes: SanitizedPathChange[] } | null {
   if (typeof message !== "object" || message === null) {
     return null;
@@ -149,5 +160,5 @@ export function sanitizeRendererInvokeMcpRequestPaths(
   ) {
     return null;
   }
-  return sanitizeMcpRequestPaths(candidate.args[0], homeDir);
+  return sanitizeMcpRequestPaths(candidate.args[0], homeDir, browseRoot);
 }

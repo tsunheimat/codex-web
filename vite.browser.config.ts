@@ -38,6 +38,14 @@ export default defineConfig({
         target: `http://127.0.0.1:8214`,
         changeOrigin: true,
       },
+      "/__backend/download": {
+        target: `http://127.0.0.1:8214`,
+        changeOrigin: true,
+      },
+      "/@fs": {
+        target: `http://127.0.0.1:8214`,
+        changeOrigin: true,
+      },
     },
   },
   resolve: {

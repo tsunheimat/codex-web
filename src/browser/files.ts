@@ -15,6 +15,58 @@ type PickFilesRequest = {
   pickerTitle?: string;
 };
 
+function downloadFilename(
+  contentDisposition: string | null,
+  filePath: string,
+): string {
+  const encoded = contentDisposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      // Fall back to the safe ASCII filename supplied by the server.
+    }
+  }
+  const ascii = contentDisposition?.match(/filename="([^"]+)"/i)?.[1];
+  return ascii || filePath.split(/[\\/]/).at(-1) || "download";
+}
+
+export async function downloadWorkspaceFileCopy({
+  hostId,
+  path,
+}: {
+  hostId: string;
+  path: string;
+}): Promise<void> {
+  if (hostId !== "local") {
+    throw new Error("Only local workspace files can be downloaded");
+  }
+  const downloadUrl = new URL("/__backend/download", window.location.href);
+  downloadUrl.searchParams.set("path", path);
+  const response = await fetch(downloadUrl);
+  if (!response.ok) {
+    throw new Error(
+      `Download failed: ${response.status} ${response.statusText}`,
+    );
+  }
+
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = downloadFilename(
+    response.headers.get("content-disposition"),
+    path,
+  );
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  }
+}
+
 function openBrowserFilePicker({
   allowMultiple,
   imagesOnly,

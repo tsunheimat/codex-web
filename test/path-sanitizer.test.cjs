@@ -1,4 +1,8 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 const {
   expandTildePath,
@@ -139,5 +143,75 @@ test("does not normalize malformed invoke argument cardinality", () => {
     if (envelope) {
       assert.equal(envelope.request.params.cwd, "~");
     }
+  }
+});
+
+test("canonicalizes bounded cwd and writable roots and rejects outside authority", async (t) => {
+  const temporaryRoot = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "codex-web-path-sanitizer-"),
+  );
+  const browseRoot = path.join(temporaryRoot, "workspace");
+  const nestedRoot = path.join(browseRoot, "nested");
+  const outsideRoot = path.join(temporaryRoot, "outside");
+  await Promise.all([
+    fsp.mkdir(nestedRoot, { recursive: true }),
+    fsp.mkdir(outsideRoot, { recursive: true }),
+  ]);
+  t.after(() => fsp.rm(temporaryRoot, { recursive: true, force: true }));
+
+  const bounded = request("thread/start", {
+    cwd: nestedRoot,
+    runtimeWorkspaceRoots: [browseRoot],
+    sandbox: { writableRoots: [nestedRoot] },
+  });
+  assert.equal(sanitizeMcpRequestPaths(bounded, HOME, browseRoot), null);
+  assert.deepEqual(bounded.request.params, {
+    cwd: nestedRoot,
+    runtimeWorkspaceRoots: [browseRoot],
+    sandbox: { writableRoots: [nestedRoot] },
+  });
+
+  for (const params of [
+    { cwd: outsideRoot },
+    { runtimeWorkspaceRoots: [outsideRoot] },
+    { sandbox: { writableRoots: [outsideRoot] } },
+  ]) {
+    assert.throws(
+      () =>
+        sanitizeMcpRequestPaths(
+          request("thread/resume", params),
+          HOME,
+          browseRoot,
+        ),
+      /outside CODEX_WEBUI_BROWSE_ROOT/,
+    );
+  }
+
+  const missingRoot = path.join(browseRoot, "missing");
+  assert.throws(
+    () =>
+      sanitizeMcpRequestPaths(
+        request("thread/start", {
+          cwd: browseRoot,
+          sandbox: { writableRoots: [missingRoot] },
+        }),
+        HOME,
+        browseRoot,
+      ),
+    /does not exist/,
+  );
+
+  if (process.platform !== "win32") {
+    const escape = path.join(browseRoot, "escape");
+    fs.symlinkSync(outsideRoot, escape);
+    assert.throws(
+      () =>
+        sanitizeMcpRequestPaths(
+          request("thread/start", { cwd: escape }),
+          HOME,
+          browseRoot,
+        ),
+      /must not contain symlinks/,
+    );
   }
 });

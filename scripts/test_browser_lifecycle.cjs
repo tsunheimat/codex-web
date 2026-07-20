@@ -617,6 +617,153 @@ async function passFirstRunOnboarding(page) {
   return await waitForComposer(page);
 }
 
+async function exerciseWorkspaceFiles(
+  page,
+  { browseRoot, nestedWorkspace, outsideFile, uploadFixture, uploadBytes },
+) {
+  const projectSelector = page.locator(
+    '[data-composer-navigation-target="workspace-project"]',
+  );
+  await projectSelector.waitFor({ state: "visible", timeout: 30_000 });
+  await projectSelector.click();
+  const newProjectItem = page.getByRole("menuitem", {
+    exact: true,
+    name: "New project",
+  });
+  await newProjectItem.hover();
+  await page
+    .getByRole("menuitem", { exact: true, name: "Use an existing folder" })
+    .click();
+
+  const dialog = page.getByRole("dialog", { name: "Add remote project" });
+  await dialog.waitFor({ state: "visible", timeout: 30_000 });
+  const selectedPath = dialog.getByLabel("Selected folder path");
+  await waitFor(
+    "workspace picker canonical browse root",
+    async () => (await selectedPath.inputValue()) === browseRoot,
+  );
+  assert.equal(
+    await dialog.getByRole("button", { name: "Enclosing folder" }).isDisabled(),
+    true,
+    "browse root exposed a parent outside its authority",
+  );
+  const rootEntries = await dialog
+    .locator("button[data-path]")
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.textContent?.trim()),
+    );
+  assert.deepEqual(rootEntries, ["alpha", "zeta"]);
+
+  const alpha = dialog.locator(
+    `button[data-path=${JSON.stringify(nestedWorkspace)}]`,
+  );
+  await alpha.dblclick();
+  await waitFor(
+    "workspace picker nested navigation",
+    async () => (await selectedPath.inputValue()) === nestedWorkspace,
+  );
+  await dialog.getByRole("button", { name: "Enclosing folder" }).click();
+  await waitFor(
+    "workspace picker bounded parent navigation",
+    async () => (await selectedPath.inputValue()) === browseRoot,
+  );
+  await dialog
+    .locator(`button[data-path=${JSON.stringify(nestedWorkspace)}]`)
+    .click();
+  await dialog
+    .getByRole("button", { exact: true, name: "Add project" })
+    .click();
+  await dialog.waitFor({ state: "detached", timeout: 30_000 });
+  await waitForComposer(page);
+
+  const attachButton = page.getByRole("button", {
+    name: /Attach files|Add files|Add photos/i,
+  });
+  await attachButton.last().click();
+  const attachMenuItem = page.getByText("Files and folders", { exact: true });
+  await attachMenuItem.waitFor({ state: "visible", timeout: 30_000 });
+  const fileChooserPromise = page.waitForEvent("filechooser", {
+    timeout: 30_000,
+  });
+  await attachMenuItem.click();
+  const fileChooser = await fileChooserPromise;
+  const uploadResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/__backend/upload",
+    { timeout: 30_000 },
+  );
+  await fileChooser.setFiles(uploadFixture);
+  const uploadResponse = await uploadResponsePromise;
+  assert.equal(uploadResponse.status(), 200);
+  const uploadResult = await uploadResponse.json();
+  assert.equal(uploadResult.files.length, 1);
+  assert.equal(uploadResult.files[0].label, path.basename(uploadFixture));
+  assert.equal(
+    path.dirname(uploadResult.files[0].path).startsWith(browseRoot),
+    false,
+  );
+  await waitFor("official renderer uploaded attachment label", async () =>
+    (await page.locator("body").innerText()).includes(
+      path.basename(uploadFixture),
+    ),
+  );
+
+  const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
+  await page.evaluate(async (uploadedPath) => {
+    await window.__ELECTRON_SHIM__.services.workspaceFiles.downloadCopy({
+      hostId: "local",
+      path: uploadedPath,
+    });
+  }, uploadResult.files[0].path);
+  const download = await downloadPromise;
+  assert.equal(download.suggestedFilename(), path.basename(uploadFixture));
+  const downloadedPath = await download.path();
+  assert(downloadedPath, "Chromium did not retain the downloaded file");
+  assert.deepEqual(await fs.readFile(downloadedPath), uploadBytes);
+
+  const boundaryStatuses = await page.evaluate(async (forbiddenPath) => {
+    const downloadUrl = new URL("/__backend/download", window.location.href);
+    downloadUrl.searchParams.set("path", forbiddenPath);
+    const staticUrl = `/@fs${forbiddenPath
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")}`;
+    const [downloadResponse, staticResponse] = await Promise.all([
+      fetch(downloadUrl),
+      fetch(staticUrl),
+    ]);
+    let shimRejected = false;
+    try {
+      await window.__ELECTRON_SHIM__.services.workspaceFiles.downloadCopy({
+        hostId: "local",
+        path: forbiddenPath,
+      });
+    } catch {
+      shimRejected = true;
+    }
+    return {
+      download: downloadResponse.status,
+      staticFile: staticResponse.status,
+      shimRejected,
+    };
+  }, outsideFile);
+  assert.deepEqual(boundaryStatuses, {
+    download: 403,
+    staticFile: 404,
+    shimRejected: true,
+  });
+
+  return {
+    browseRoot,
+    selectedWorkspace: nestedWorkspace,
+    uploadedPath: uploadResult.files[0].path,
+    uploadedLabel: uploadResult.files[0].label,
+    downloadedBytes: uploadBytes.length,
+    boundaryStatuses,
+  };
+}
+
 async function submitPrompt(page, prompt) {
   const composer = await waitForComposer(page);
   await composer.click();
@@ -786,6 +933,12 @@ async function main() {
   const isolatedHome = path.join(tempRoot, "home");
   const codexHome = path.join(isolatedHome, ".codex");
   const workspace = path.join(tempRoot, "workspace");
+  const browseRoot = path.join(tempRoot, "browse-root");
+  const nestedWorkspace = path.join(browseRoot, "alpha");
+  const outsideRoot = path.join(tempRoot, "outside-root");
+  const outsideFile = path.join(outsideRoot, "secret.txt");
+  const uploadFixture = path.join(tempRoot, "phase3-upload.bin");
+  const uploadBytes = Buffer.from([0, 1, 2, 3, 0xfe, 0xff, 0x41, 0x42]);
   const profileOne = path.join(tempRoot, "chromium-profile-one");
   const profileTwo = path.join(tempRoot, "chromium-profile-two");
   const externalNetworkLog = path.join(tempRoot, "external-network.log");
@@ -803,17 +956,23 @@ async function main() {
   let loopbackProxy = null;
   let serverDescendantPids = [];
   let browserDescendantPids = [];
+  let workspaceFilesEvidence = null;
 
   try {
     await Promise.all([
       fs.mkdir(codexHome, { recursive: true }),
       fs.mkdir(workspace, { recursive: true }),
+      fs.mkdir(nestedWorkspace, { recursive: true }),
+      fs.mkdir(path.join(browseRoot, "zeta"), { recursive: true }),
+      fs.mkdir(outsideRoot, { recursive: true }),
       fs.mkdir(path.join(tempRoot, "tmp"), { recursive: true }),
       fs.mkdir(path.join(tempRoot, "xdg-cache"), { recursive: true }),
       fs.mkdir(path.join(tempRoot, "xdg-config"), { recursive: true }),
       fs.mkdir(path.join(tempRoot, "xdg-data"), { recursive: true }),
       fs.mkdir(path.join(tempRoot, "xdg-state"), { recursive: true }),
       fs.writeFile(externalNetworkLog, "", { mode: 0o600 }),
+      fs.writeFile(outsideFile, "outside browse authority", { mode: 0o600 }),
+      fs.writeFile(uploadFixture, uploadBytes, { mode: 0o600 }),
     ]);
 
     mockProvider = captureChild(
@@ -878,6 +1037,7 @@ async function main() {
       HOME: isolatedHome,
       CODEX_HOME: codexHome,
       CODEX_CLI_PATH: codexExecutable,
+      CODEX_WEBUI_BROWSE_ROOT: browseRoot,
       TMPDIR: path.join(tempRoot, "tmp"),
       XDG_CACHE_HOME: path.join(tempRoot, "xdg-cache"),
       XDG_CONFIG_HOME: path.join(tempRoot, "xdg-config"),
@@ -930,6 +1090,13 @@ async function main() {
       waitUntil: "domcontentloaded",
     });
     await passFirstRunOnboarding(page);
+    workspaceFilesEvidence = await exerciseWorkspaceFiles(page, {
+      browseRoot,
+      nestedWorkspace,
+      outsideFile,
+      uploadFixture,
+      uploadBytes,
+    });
 
     const nativeAppServer = await waitFor(
       "server-owned native Codex app-server child",
@@ -1138,6 +1305,7 @@ async function main() {
           appServerPid,
           mockProviderPid: mockReady.pid,
           blockedExternalServerRequests: blockedServerRequests.length,
+          workspaceFilesEvidence,
           reconnectEvidence: {
             originalSocketSequence: originalIpcSocket.sequence,
             originalClosed: originalIpcSocket.closedAt !== null,

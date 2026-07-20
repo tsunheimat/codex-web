@@ -13,7 +13,6 @@ import path from "node:path";
 import { parseArgs as parseCliArgs } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
 import Fastify from "fastify";
-import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
@@ -28,6 +27,12 @@ import {
   parseRendererBridgeReady,
   RendererRecoveryCoordinator,
 } from "./renderer-recovery";
+import { registerWorkspaceFileRoutes } from "./workspace-file-routes";
+import {
+  getWorkspaceDirectoryEntries,
+  WorkspaceFileAuthority,
+  type WorkspaceDirectoryEntries,
+} from "./workspace-files";
 
 type ServerOptions = {
   host: string;
@@ -89,43 +94,6 @@ type MainToRendererMessage =
       ok: false;
       errorMessage: string;
     };
-
-type WorkspaceDirectoryEntry = {
-  name: string;
-  path: string;
-  type: "directory" | "file";
-};
-
-type WorkspaceDirectoryEntries = {
-  directoryPath: string;
-  parentPath: string | null;
-  entries: WorkspaceDirectoryEntry[];
-};
-
-function workspaceDirectoryEntryTypeRank(
-  entry: WorkspaceDirectoryEntry,
-): number {
-  return entry.type === "directory" ? 0 : 1;
-}
-
-function workspaceDirectoryEntryHiddenRank(
-  entry: WorkspaceDirectoryEntry,
-): number {
-  return entry.name.startsWith(".") ? 1 : 0;
-}
-
-function compareWorkspaceDirectoryEntries(
-  left: WorkspaceDirectoryEntry,
-  right: WorkspaceDirectoryEntry,
-): number {
-  return (
-    workspaceDirectoryEntryTypeRank(left) -
-      workspaceDirectoryEntryTypeRank(right) ||
-    workspaceDirectoryEntryHiddenRank(left) -
-      workspaceDirectoryEntryHiddenRank(right) ||
-    left.name.localeCompare(right.name)
-  );
-}
 
 type IpcMainBridgeState = {
   broadcastToRenderer?: (message: MainToRendererMessage) => void;
@@ -205,8 +173,15 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-function sanitizeOutboundMcpRequest(message: RendererToMainMessage): void {
-  const result = sanitizeRendererInvokeMcpRequestPaths(message, os.homedir());
+function sanitizeOutboundMcpRequest(
+  message: RendererToMainMessage,
+  browseRoot: string,
+): void {
+  const result = sanitizeRendererInvokeMcpRequestPaths(
+    message,
+    os.homedir(),
+    browseRoot,
+  );
   if (!result) {
     return;
   }
@@ -215,48 +190,6 @@ function sanitizeOutboundMcpRequest(message: RendererToMainMessage): void {
       `[mcp-request-sanitizer] ${result.method} ${change.key}: ${JSON.stringify(change.before)} -> ${change.after === null ? "dropped" : JSON.stringify(change.after)}`,
     );
   }
-}
-
-async function getWorkspaceDirectoryEntries({
-  directoryPath,
-  directoriesOnly,
-}: {
-  directoryPath: string | null;
-  directoriesOnly: boolean;
-}): Promise<WorkspaceDirectoryEntries> {
-  const requestedPath = directoryPath?.trim() || os.homedir();
-  const resolvedPath = path.resolve(requestedPath);
-  const stat = await fs.stat(resolvedPath);
-  if (!stat.isDirectory()) {
-    throw new Error(`Directory not found: ${requestedPath}`);
-  }
-
-  const entries = (await fs.readdir(resolvedPath, { withFileTypes: true }))
-    .flatMap((entry): WorkspaceDirectoryEntry[] => {
-      const type = entry.isDirectory() ? "directory" : "file";
-      if (directoriesOnly && type !== "directory") {
-        return [];
-      }
-
-      return [
-        {
-          name: entry.name,
-          path: path.join(resolvedPath, entry.name),
-          type,
-        },
-      ];
-    })
-    .sort(compareWorkspaceDirectoryEntries);
-
-  const rootPath = path.parse(resolvedPath).root;
-  const parentPath =
-    resolvedPath === rootPath ? null : path.dirname(resolvedPath);
-
-  return {
-    directoryPath: resolvedPath,
-    parentPath,
-    entries,
-  };
 }
 
 function ensureElectronLikeProcessContext(): void {
@@ -296,6 +229,10 @@ function sendBridgeReset(socket: WebSocket, reason: string): void {
 }
 
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
+  const configuredBrowseRoot =
+    process.env.CODEX_WEBUI_BROWSE_ROOT?.trim() || os.homedir();
+  const workspaceFileAuthority =
+    await WorkspaceFileAuthority.create(configuredBrowseRoot);
   const bridgeState = getIpcMainBridgeState();
   const app = Fastify({ logger: false });
   const websocketServer = new WebSocketServer({ noServer: true });
@@ -363,47 +300,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     }
   });
 
-  await app.register(fastifyMultipart, {
-    limits: {
-      fileSize: Infinity,
-    },
-  });
-
-  const uploadRoot = await fs.mkdtemp(
-    path.join(os.tmpdir(), "codex-web-uploads-"),
-  );
-
-  app.post("/__backend/upload", async (request, reply) => {
-    if (!request.isMultipart()) {
-      return reply.code(400).send({ error: "expected multipart upload body" });
-    }
-
-    const files = await Array.fromAsync(
-      (async function* () {
-        for await (const part of request.files()) {
-          const label = part.filename?.trim() || "upload";
-
-          const uploadedPath = path.join(uploadRoot, randomUUID());
-
-          await fs.writeFile(uploadedPath, await part.toBuffer());
-
-          yield {
-            label,
-            path: uploadedPath,
-            fsPath: uploadedPath,
-          };
-        }
-      })(),
-    );
-
-    return reply.send({ files });
-  });
-
-  await app.register(fastifyStatic, {
-    root: "/",
-    prefix: "/@fs/",
-    decorateReply: false,
-  });
+  await registerWorkspaceFileRoutes(app, workspaceFileAuthority);
 
   await app.register(fastifyStatic, {
     root: path.resolve(__dirname, "../../scratch/asar/webview"),
@@ -528,7 +425,11 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     if (message.type === "workspace-directory-entries-request") {
       const { requestId } = message;
-      getWorkspaceDirectoryEntries(message)
+      getWorkspaceDirectoryEntries(
+        message.directoryPath,
+        message.directoriesOnly,
+        workspaceFileAuthority.browseRoot,
+      )
         .then((result) => {
           session.send({
             type: "workspace-directory-entries-result",
@@ -550,13 +451,21 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     if (message.type === "ipc-renderer-invoke") {
       const { channel, requestId, args } = message;
-      sanitizeOutboundMcpRequest(message);
-      Promise.resolve(
-        bridgeState.handleRendererInvoke?.(channel, args) ??
-          Promise.reject(
-            new Error(`[ipc-bridge] no ipcMain.handle for channel ${channel}`),
-          ),
-      )
+      Promise.resolve()
+        .then(() => {
+          sanitizeOutboundMcpRequest(
+            message,
+            workspaceFileAuthority.browseRoot,
+          );
+          return (
+            bridgeState.handleRendererInvoke?.(channel, args) ??
+            Promise.reject(
+              new Error(
+                `[ipc-bridge] no ipcMain.handle for channel ${channel}`,
+              ),
+            )
+          );
+        })
         .then((result) => {
           session.send({
             type: "ipc-renderer-invoke-result",
@@ -578,6 +487,28 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
   await app.listen({ host: options.host, port: options.port });
   console.log(`IPC bridge listening at ws://${options.host}:${options.port}`);
+  console.log(`Workspace browse root: ${workspaceFileAuthority.browseRoot}`);
+
+  let shuttingDown = false;
+  const shutDown = (): void => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    for (const session of sessions.values()) {
+      session.dispose("server shutdown");
+    }
+    for (const client of websocketServer.clients) {
+      client.terminate();
+    }
+    websocketServer.close();
+    void app
+      .close()
+      .catch((error) => console.error(errorMessage(error)))
+      .finally(() => process.exit(0));
+  };
+  process.once("SIGINT", shutDown);
+  process.once("SIGTERM", shutDown);
 
   ensureElectronLikeProcessContext();
   installModuleAliasHook();

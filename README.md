@@ -40,6 +40,21 @@ nix run github:0xcaff/codex-web
 
 then open <http://127.0.0.1:8214> in a browser.
 
+### workspace file boundary
+
+The project picker, workspace file previews/downloads, and workspace-related
+runtime roots are restricted to `CODEX_WEBUI_BROWSE_ROOT`. It defaults to the
+server user's home directory. Set it to the directory that should be available
+to Browser users before starting the server; container deployments can use
+`/workspace` without changing source code:
+
+```bash
+CODEX_WEBUI_BROWSE_ROOT=/workspace codex-web
+```
+
+The configured path must already exist and be a directory. It is canonicalized
+at startup, and paths outside it or through symlinks are rejected.
+
 ### sign in
 
 ensure the codex cli on the host machine is signed in before starting the

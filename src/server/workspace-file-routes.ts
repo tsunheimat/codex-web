@@ -1,0 +1,113 @@
+import { createReadStream } from "node:fs";
+import fastifyMultipart from "@fastify/multipart";
+import type { FastifyInstance, FastifyReply } from "fastify";
+import {
+  attachmentContentDisposition,
+  contentTypeForWorkspaceFile,
+  WORKSPACE_UPLOAD_LIMITS,
+  WorkspaceFileAuthority,
+  WorkspacePathError,
+} from "./workspace-files";
+
+function workspaceErrorReply(error: unknown, reply: FastifyReply) {
+  if (error instanceof WorkspacePathError) {
+    return reply.code(error.statusCode).send({ error: error.message });
+  }
+  throw error;
+}
+
+export function workspacePathFromAtFsUrl(rawUrl: string): string {
+  const rawPath = rawUrl.split("?", 1)[0] ?? "";
+  if (!rawPath.startsWith("/@fs/")) {
+    throw new WorkspacePathError("Invalid workspace file URL");
+  }
+  try {
+    return decodeURIComponent(rawPath.slice("/@fs".length));
+  } catch (error) {
+    throw new WorkspacePathError("Invalid workspace file URL encoding", 400);
+  }
+}
+
+export async function registerWorkspaceFileRoutes(
+  app: FastifyInstance,
+  authority: WorkspaceFileAuthority,
+): Promise<void> {
+  app.addHook("onClose", async () => {
+    await authority.cleanup();
+  });
+  await app.register(fastifyMultipart, {
+    limits: WORKSPACE_UPLOAD_LIMITS,
+  });
+
+  app.post("/__backend/upload", async (request, reply) => {
+    if (!request.isMultipart()) {
+      return reply.code(400).send({ error: "expected multipart upload body" });
+    }
+
+    const storedFiles: Awaited<
+      ReturnType<WorkspaceFileAuthority["storeUpload"]>
+    >[] = [];
+    try {
+      for await (const part of request.parts()) {
+        if (part.type !== "file" || part.fieldname !== "files") {
+          throw new WorkspacePathError(
+            "multipart body may contain only 'files' file parts",
+          );
+        }
+        const stored = await authority.storeUpload(part.file, part.filename);
+        if (part.file.truncated) {
+          await authority.discardUpload(stored.path);
+          throw new WorkspacePathError("uploaded file exceeds size limit", 413);
+        }
+        storedFiles.push(stored);
+      }
+    } catch (error) {
+      await Promise.all(
+        storedFiles.map((file) => authority.discardUpload(file.path)),
+      );
+      throw error;
+    }
+
+    if (storedFiles.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: "multipart body contained no files" });
+    }
+    return reply.send({ files: storedFiles });
+  });
+
+  app.get("/__backend/download", async (request, reply) => {
+    const query = request.query as { path?: unknown };
+    if (typeof query.path !== "string") {
+      return reply.code(400).send({ error: "download path is required" });
+    }
+    try {
+      const file = authority.resolveAllowedFile(query.path);
+      return reply
+        .header(
+          "content-disposition",
+          attachmentContentDisposition(file.downloadName),
+        )
+        .header("x-content-type-options", "nosniff")
+        .type("application/octet-stream")
+        .send(createReadStream(file.path));
+    } catch (error) {
+      return workspaceErrorReply(error, reply);
+    }
+  });
+
+  app.get("/@fs/*", async (request, reply) => {
+    try {
+      const requestedPath = workspacePathFromAtFsUrl(request.raw.url ?? "");
+      const file = authority.resolveAllowedFile(requestedPath);
+      return reply
+        .header("x-content-type-options", "nosniff")
+        .type(contentTypeForWorkspaceFile(file.downloadName))
+        .send(createReadStream(file.path));
+    } catch {
+      // Static file authority is intentionally fail-closed without revealing
+      // which host paths exist outside the configured roots.
+      return reply.code(404).send({ error: "Not Found" });
+    }
+  });
+}

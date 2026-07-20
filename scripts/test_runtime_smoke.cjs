@@ -1,8 +1,14 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { WebSocket } = require("ws");
 
 const baseUrl = process.env.CODEX_WEB_SMOKE_URL ?? "http://127.0.0.1:8214";
 const websocketUrl = `${baseUrl.replace(/^http/, "ws")}/__backend/ipc`;
+const expectedBrowseRoot = fs.realpathSync(
+  path.resolve(process.env.CODEX_WEBUI_BROWSE_ROOT ?? os.homedir()),
+);
 
 async function assertCachePolicy(pathname, expected) {
   const response = await fetch(`${baseUrl}${pathname}`);
@@ -79,14 +85,14 @@ async function requestWorkspaceDirectories(socket, id, ack, requestId) {
       message: {
         type: "workspace-directory-entries-request",
         requestId,
-        directoryPath: process.cwd(),
+        directoryPath: null,
         directoriesOnly: true,
       },
     }),
   );
   const resultFrame = await result;
   assert.equal(resultFrame.message.ok, true);
-  assert.equal(resultFrame.message.result.directoryPath, process.cwd());
+  assert.equal(resultFrame.message.result.directoryPath, expectedBrowseRoot);
   socket.send(JSON.stringify({ type: "bridge-ack", ack: resultFrame.id }));
   return resultFrame;
 }
@@ -120,7 +126,7 @@ async function main() {
       message: {
         type: "workspace-directory-entries-request",
         requestId: "runtime-smoke-directory",
-        directoryPath: process.cwd(),
+        directoryPath: null,
         directoriesOnly: true,
       },
     }),
@@ -128,7 +134,7 @@ async function main() {
   const resultFrame = await result;
   assert.equal(resultFrame.id, 1);
   assert.equal(resultFrame.message.ok, true);
-  assert.equal(resultFrame.message.result.directoryPath, process.cwd());
+  assert.equal(resultFrame.message.result.directoryPath, expectedBrowseRoot);
   first.send(JSON.stringify({ type: "bridge-ack", ack: resultFrame.id }));
   first.terminate();
 

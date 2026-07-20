@@ -4,6 +4,7 @@ import {
   mapMemoryPathToBrowserPath,
 } from "./routes";
 import {
+  downloadWorkspaceFileCopy,
   handleLocalFilePickerMessage,
   isLocalFilePickerMessage,
 } from "./files";
@@ -658,7 +659,10 @@ electronShim.services = {
       version: __CODEX_APP_VERSION__,
     }),
   },
-  workspaceFiles: electronShim.services?.workspaceFiles ?? {},
+  workspaceFiles: {
+    ...electronShim.services?.workspaceFiles,
+    downloadCopy: downloadWorkspaceFileCopy,
+  },
   requestUserInputAutoResolution: {
     ...electronShim.services?.requestUserInputAutoResolution,
     recordConversationActivity: () => undefined,
