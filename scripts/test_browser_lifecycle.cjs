@@ -268,7 +268,11 @@ async function startLoopbackProxy(targetPort) {
         ipcConnections.includes(connection),
         "IPC connection does not belong to this lifecycle proxy",
       );
-      assert.equal(connection.severedAt, null, "IPC connection already severed");
+      assert.equal(
+        connection.severedAt,
+        null,
+        "IPC connection already severed",
+      );
       assert.equal(
         connection.clientClosedAt,
         null,
