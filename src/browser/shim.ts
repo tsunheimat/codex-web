@@ -529,20 +529,6 @@ function resetBridge(reason: string): void {
   window.location.reload();
 }
 
-window.addEventListener("offline", () => {
-  if (
-    socket &&
-    (socket.readyState === WebSocket.OPEN ||
-      socket.readyState === WebSocket.CONNECTING)
-  ) {
-    socket.close(1000, "browser offline");
-  }
-});
-
-window.addEventListener("online", () => {
-  ensureSocket();
-});
-
 function nextRequestId(): string {
   requestCounter += 1;
   return `ipc_bridge_${requestCounter}`;

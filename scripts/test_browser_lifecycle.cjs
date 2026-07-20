@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -122,6 +123,181 @@ async function unusedLoopbackPort() {
     server.close((error) => (error ? reject(error) : resolve())),
   );
   return address.port;
+}
+
+async function startLoopbackProxy(targetPort) {
+  const clientSockets = new Set();
+  const upstreamSockets = new Set();
+  const ipcConnections = [];
+  let closing = false;
+
+  const proxyServer = http.createServer((request, response) => {
+    const upstreamRequest = http.request(
+      {
+        agent: false,
+        headers: request.headers,
+        host: "127.0.0.1",
+        method: request.method,
+        path: request.url,
+        port: targetPort,
+      },
+      (upstreamResponse) => {
+        response.writeHead(
+          upstreamResponse.statusCode,
+          upstreamResponse.statusMessage,
+          upstreamResponse.rawHeaders,
+        );
+        upstreamResponse.pipe(response);
+      },
+    );
+    upstreamRequest.on("error", (error) => {
+      if (closing) {
+        response.destroy();
+        return;
+      }
+      if (response.headersSent) {
+        response.destroy(error);
+        return;
+      }
+      response.writeHead(502, { "content-type": "text/plain" });
+      response.end("Loopback lifecycle proxy could not reach Codex Web");
+    });
+    request.on("aborted", () => upstreamRequest.destroy());
+    response.on("close", () => {
+      if (!response.writableEnded) {
+        upstreamRequest.destroy();
+      }
+    });
+    request.pipe(upstreamRequest);
+  });
+
+  proxyServer.on("connection", (socket) => {
+    clientSockets.add(socket);
+    socket.once("close", () => clientSockets.delete(socket));
+  });
+
+  proxyServer.on("upgrade", (request, clientSocket, head) => {
+    clientSocket.pause();
+    const upstreamSocket = net.createConnection({
+      host: "127.0.0.1",
+      port: targetPort,
+    });
+    upstreamSockets.add(upstreamSocket);
+    upstreamSocket.once("close", () => upstreamSockets.delete(upstreamSocket));
+
+    const requestPath = new URL(
+      request.url ?? "/",
+      "http://lifecycle-proxy.invalid",
+    ).pathname;
+    const ipcConnection =
+      requestPath === "/__backend/ipc"
+        ? {
+            sequence: ipcConnections.length + 1,
+            createdAt: Date.now(),
+            connectedAt: null,
+            severedAt: null,
+            clientClosedAt: null,
+            upstreamClosedAt: null,
+          }
+        : null;
+    if (ipcConnection) {
+      ipcConnections.push(ipcConnection);
+      Object.defineProperties(ipcConnection, {
+        clientSocket: { value: clientSocket },
+        upstreamSocket: { value: upstreamSocket },
+      });
+    }
+
+    clientSocket.on("error", () => upstreamSocket.destroy());
+    upstreamSocket.on("error", () => clientSocket.destroy());
+    clientSocket.once("close", () => {
+      if (ipcConnection) {
+        ipcConnection.clientClosedAt = Date.now();
+      }
+      upstreamSocket.destroy();
+    });
+    upstreamSocket.once("close", () => {
+      if (ipcConnection) {
+        ipcConnection.upstreamClosedAt = Date.now();
+      }
+      clientSocket.destroy();
+    });
+    upstreamSocket.once("connect", () => {
+      if (ipcConnection) {
+        ipcConnection.connectedAt = Date.now();
+      }
+      const requestLines = [
+        `${request.method} ${request.url} HTTP/${request.httpVersion}`,
+      ];
+      for (let index = 0; index < request.rawHeaders.length; index += 2) {
+        requestLines.push(
+          `${request.rawHeaders[index]}: ${request.rawHeaders[index + 1]}`,
+        );
+      }
+      upstreamSocket.write(`${requestLines.join("\r\n")}\r\n\r\n`);
+      if (head.length > 0) {
+        upstreamSocket.write(head);
+      }
+      clientSocket.pipe(upstreamSocket);
+      upstreamSocket.pipe(clientSocket);
+      clientSocket.resume();
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    proxyServer.once("error", reject);
+    proxyServer.listen(0, "127.0.0.1", resolve);
+  });
+  const address = proxyServer.address();
+  assert(address && typeof address !== "string");
+
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    ipcConnections,
+    activeIpcConnections() {
+      return ipcConnections.filter(
+        (connection) =>
+          connection.connectedAt !== null &&
+          connection.severedAt === null &&
+          connection.clientClosedAt === null &&
+          connection.upstreamClosedAt === null,
+      );
+    },
+    severIpcConnection(connection) {
+      assert(
+        ipcConnections.includes(connection),
+        "IPC connection does not belong to this lifecycle proxy",
+      );
+      assert.equal(connection.severedAt, null, "IPC connection already severed");
+      assert.equal(
+        connection.clientClosedAt,
+        null,
+        "IPC client connection already closed",
+      );
+      assert.equal(
+        connection.upstreamClosedAt,
+        null,
+        "IPC upstream connection already closed",
+      );
+      connection.severedAt = Date.now();
+      connection.clientSocket.destroy();
+      connection.upstreamSocket.destroy();
+    },
+    async close() {
+      closing = true;
+      for (const socket of [...clientSockets, ...upstreamSockets]) {
+        socket.destroy();
+      }
+      await new Promise((resolve, reject) => {
+        proxyServer.close((error) => (error ? reject(error) : resolve()));
+      });
+      await waitFor(
+        "loopback proxy socket cleanup",
+        () => clientSockets.size === 0 && upstreamSockets.size === 0,
+        10_000,
+      );
+    },
+  };
 }
 
 function findExecutable(command) {
@@ -620,6 +796,7 @@ async function main() {
   };
   let mockProvider = null;
   let server = null;
+  let loopbackProxy = null;
   let serverDescendantPids = [];
   let browserDescendantPids = [];
 
@@ -742,7 +919,8 @@ async function main() {
       30_000,
     );
 
-    const browserOrigin = `http://127.0.0.1:${port}`;
+    loopbackProxy = await startLoopbackProxy(port);
+    const browserOrigin = loopbackProxy.origin;
     let page = await launchBrowser(profileOne, diagnostics, browserOrigin);
     await page.goto(`${browserOrigin}/`, {
       waitUntil: "domcontentloaded",
@@ -789,13 +967,28 @@ async function main() {
     );
     assert.equal(originalHello.connectionId, originalReady.connectionId);
     assert.equal(originalHello.serverEpoch, null);
-    await browserContext.setOffline(true);
+    const reconnectPage = page;
+    const reconnectBrowserContext = browserContext;
+    const activeProxyIpcConnections = loopbackProxy.activeIpcConnections();
+    assert.equal(
+      activeProxyIpcConnections.length,
+      1,
+      "expected exactly one active proxied IPC connection before severing",
+    );
+    const originalProxyIpcConnection = activeProxyIpcConnections[0];
+    loopbackProxy.severIpcConnection(originalProxyIpcConnection);
     await waitFor(
-      "original IPC WebSocket close while Chromium is offline",
+      "both sides of the original proxied IPC TCP connection to close",
+      () =>
+        originalProxyIpcConnection.clientClosedAt !== null &&
+        originalProxyIpcConnection.upstreamClosedAt !== null,
+      30_000,
+    );
+    await waitFor(
+      "Chromium to observe the original IPC WebSocket close",
       () => originalIpcSocket.closedAt !== null,
       30_000,
     );
-    await browserContext.setOffline(false);
     const replacementIpcSocket = await waitFor(
       "replacement IPC WebSocket handshake",
       () =>
@@ -818,6 +1011,26 @@ async function main() {
       30_000,
     );
     assert.notEqual(replacementIpcSocket.sequence, originalIpcSocket.sequence);
+    const replacementProxyIpcConnection = await waitFor(
+      "distinct replacement proxied IPC TCP connection",
+      () =>
+        loopbackProxy
+          .activeIpcConnections()
+          .find(
+            (connection) =>
+              connection.sequence > originalProxyIpcConnection.sequence,
+          ),
+      30_000,
+    );
+    const sameReconnectPage = page === reconnectPage;
+    const sameReconnectBrowserContext =
+      browserContext === reconnectBrowserContext;
+    assert(sameReconnectPage, "reconnect replaced the Browser page");
+    assert(
+      sameReconnectBrowserContext,
+      "reconnect replaced the Browser context",
+    );
+    assertRuntimeIdentity(server, serverPid, appServerPids);
     await waitForScenarioCompleted(mockReady.baseUrl, reconnect);
     await assertExactlyOnce(page, reconnect.output);
     assertRuntimeIdentity(server, serverPid, appServerPids);
@@ -925,6 +1138,14 @@ async function main() {
             originalSocketSequence: originalIpcSocket.sequence,
             originalClosed: originalIpcSocket.closedAt !== null,
             replacementSocketSequence: replacementIpcSocket.sequence,
+            originalProxyConnectionSequence:
+              originalProxyIpcConnection.sequence,
+            originalProxyConnectionSevered:
+              originalProxyIpcConnection.severedAt !== null,
+            replacementProxyConnectionSequence:
+              replacementProxyIpcConnection.sequence,
+            samePage: sameReconnectPage,
+            sameBrowserContext: sameReconnectBrowserContext,
             reusedConnectionId: true,
             reusedServerEpoch: true,
           },
@@ -967,6 +1188,10 @@ async function main() {
       ]),
     ];
     await closeBrowser().catch(() => undefined);
+    const proxyCleanupError = await loopbackProxy?.close().then(
+      () => null,
+      (error) => error,
+    );
     await stopChild(server);
     await stopChild(mockProvider);
     const cleanupError = await waitFor(
@@ -981,6 +1206,9 @@ async function main() {
       (error) => error,
     );
     await fs.rm(tempRoot, { recursive: true, force: true });
+    if (proxyCleanupError) {
+      throw proxyCleanupError;
+    }
     if (cleanupError) {
       throw cleanupError;
     }
