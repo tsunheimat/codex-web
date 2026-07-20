@@ -61,6 +61,19 @@ test("HTTP browser bridge does not depend on secure-context randomUUID", () => {
   assert.match(shim, /reportedRendererListenerErrors\.has\(channel\)/);
 });
 
+test("browser reliable bridge rejects acknowledgements above the sent id", () => {
+  const shim = fs.readFileSync(
+    path.join(__dirname, "..", "src", "browser", "shim.ts"),
+    "utf8",
+  );
+  const acceptAck = shim.slice(
+    shim.indexOf("function acceptAck("),
+    shim.indexOf("function pumpOutgoing("),
+  );
+  assert.match(acceptAck, /ack > outgoingSentId/);
+  assert.doesNotMatch(acceptAck, /ack > outgoingMessageId/);
+});
+
 test("Desktop main bundle retains the node-pty integration point", () => {
   const buildDirectory = path.join(
     __dirname,

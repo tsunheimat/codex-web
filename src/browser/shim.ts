@@ -432,7 +432,7 @@ function acceptMessage(
 }
 
 function acceptAck(ack: number, pump = true): boolean {
-  if (!Number.isSafeInteger(ack) || ack < 0 || ack > outgoingMessageId) {
+  if (!Number.isSafeInteger(ack) || ack < 0 || ack > outgoingSentId) {
     resetBridge("invalid reliable bridge acknowledgement");
     return false;
   }

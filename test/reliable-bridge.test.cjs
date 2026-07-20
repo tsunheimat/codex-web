@@ -133,6 +133,47 @@ test("uses acknowledgement-driven in-flight and total buffer bounds", () => {
   assert.equal(bounded.disposeReason(), "reliable bridge buffer exceeded");
 });
 
+for (const frameType of ["bridge-ack", "bridge-replay-request"]) {
+  test(`rejects ${frameType} for an unsent queued message before mutation`, () => {
+    const bridge = createSession([], { maxInFlightBytes: 100 });
+    const first = new FakeSocket();
+    bridge.session.attach(first);
+    first.close();
+    bridge.session.send({ value: "a".repeat(60) });
+    bridge.session.send({ value: "b".repeat(60) });
+
+    const second = new FakeSocket();
+    bridge.session.attach(second);
+    assert.deepEqual(
+      dataFrames(second).map((frame) => frame.id),
+      [1],
+    );
+
+    let stateAtReset = null;
+    const reset = bridge.session.reset.bind(bridge.session);
+    bridge.session.reset = (reason) => {
+      stateAtReset = {
+        reason,
+        outgoingAckId: bridge.session.outgoingAckId,
+        queuedIds: bridge.session.outgoingUnacked.map((message) => message.id),
+      };
+      reset(reason);
+    };
+
+    second.receive({ type: frameType, ack: 2 });
+
+    assert.deepEqual(stateAtReset, {
+      reason: "invalid reliable bridge acknowledgement",
+      outgoingAckId: 0,
+      queuedIds: [1, 2],
+    });
+    assert.equal(
+      bridge.disposeReason(),
+      "invalid reliable bridge acknowledgement",
+    );
+  });
+}
+
 test("new page connection ids do not inherit prior in-memory state", () => {
   const receivedA = [];
   const receivedB = [];

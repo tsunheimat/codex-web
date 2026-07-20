@@ -223,7 +223,7 @@ export class ReliableBridgeSession<TIncoming, TOutgoing> {
   }
 
   private acceptAck(ack: number, pump = true): boolean {
-    if (!Number.isSafeInteger(ack) || ack < 0 || ack > this.outgoingMessageId) {
+    if (!Number.isSafeInteger(ack) || ack < 0 || ack > this.outgoingSentId) {
       this.reset("invalid reliable bridge acknowledgement");
       return false;
     }
