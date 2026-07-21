@@ -53,7 +53,22 @@ CODEX_WEBUI_BROWSE_ROOT=/workspace codex-web
 ```
 
 The configured path must already exist and be a directory. It is canonicalized
-at startup, and paths outside it or through symlinks are rejected.
+at startup, pinned for the server lifetime on Linux, and paths outside it or
+through symlinks are rejected. Picker listings and Web-owned file responses are
+consumed through authorized open descriptors, so replacing a pathname after it
+has been opened does not redirect the operation.
+
+Uploaded attachments are kept in a disposable per-process directory. Their
+aggregate retained and in-flight storage defaults to exactly 512 MiB. Set a
+different process-wide byte budget with a positive decimal safe integer:
+
+```bash
+CODEX_WEBUI_UPLOAD_QUOTA_BYTES=1073741824 codex-web
+```
+
+Invalid, zero, negative, fractional, or unsafe values fail startup before the
+server listens. This quota is separate from the 25 MiB per-file multipart
+limit.
 
 ### sign in
 

@@ -326,6 +326,31 @@ test("invalid Desktop CLI startup failure exits nonzero and cleans server owners
   await assertRunClean(run);
 });
 
+test("invalid upload quotas fail before listen without runtime residue", async (t) => {
+  for (const value of [
+    "",
+    "0",
+    "-1",
+    "1.5",
+    "1e3",
+    String(Number.MAX_SAFE_INTEGER + 1),
+  ]) {
+    await t.test(JSON.stringify(value), async (t) => {
+      const port = await unusedLoopbackPort();
+      const run = await createIsolatedRun(t, {
+        codexCliPath: hangingCodexCli,
+        environment: { CODEX_WEBUI_UPLOAD_QUOTA_BYTES: value },
+        port,
+      });
+      const result = await waitForExit(run);
+      assert.notEqual(result.code, 0, childOutput(run));
+      assert.match(childOutput(run), /positive decimal safe integer/);
+      assert.equal(childOutput(run).includes("IPC bridge listening at"), false);
+      await assertRunClean(run);
+    });
+  }
+});
+
 test("synchronous listen failure cleans the created runtime and remains nonzero", async (t) => {
   const occupied = await listenOnLoopback();
   t.after(

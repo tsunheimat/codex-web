@@ -37,7 +37,7 @@ import {
 } from "./renderer-recovery";
 import { registerWorkspaceFileRoutes } from "./workspace-file-routes";
 import {
-  getWorkspaceDirectoryEntries,
+  parseUploadQuotaBytes,
   WorkspaceFileAuthority,
   type WorkspaceDirectoryEntries,
 } from "./workspace-files";
@@ -333,8 +333,14 @@ function createServerCleanupAuthority({
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const configuredBrowseRoot =
     process.env.CODEX_WEBUI_BROWSE_ROOT?.trim() || os.homedir();
-  const workspaceFileAuthority =
-    await WorkspaceFileAuthority.create(configuredBrowseRoot);
+  const uploadQuotaBytes = parseUploadQuotaBytes(
+    process.env.CODEX_WEBUI_UPLOAD_QUOTA_BYTES,
+  );
+  const workspaceFileAuthority = await WorkspaceFileAuthority.create(
+    configuredBrowseRoot,
+    os.tmpdir(),
+    uploadQuotaBytes,
+  );
   const ownsAppServerRuntime = !process.env.CODEX_UNIX_SOCKET?.trim();
   const bridgeState = getIpcMainBridgeState();
   const app = Fastify({ logger: false });
@@ -573,11 +579,11 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     if (message.type === "workspace-directory-entries-request") {
       const { requestId } = message;
-      getWorkspaceDirectoryEntries(
-        message.directoryPath,
-        message.directoriesOnly,
-        workspaceFileAuthority.browseRoot,
-      )
+      workspaceFileAuthority
+        .getWorkspaceDirectoryEntries(
+          message.directoryPath,
+          message.directoriesOnly,
+        )
         .then((result) => {
           session.send({
             type: "workspace-directory-entries-result",

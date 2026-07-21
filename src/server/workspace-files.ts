@@ -1,9 +1,17 @@
+import {
+  constants,
+  lstatSync,
+  realpathSync,
+  statSync,
+  type BigIntStats,
+  type Dirent,
+} from "node:fs";
+import fs, { type FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { createWriteStream, lstatSync, realpathSync, statSync } from "node:fs";
-import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
+import { type Readable } from "node:stream";
+import { finished } from "node:stream/promises";
 
 export const WORKSPACE_UPLOAD_LIMITS = {
   fileSize: 25 * 1024 * 1024,
@@ -11,6 +19,8 @@ export const WORKSPACE_UPLOAD_LIMITS = {
   fields: 0,
   parts: 20,
 } as const;
+
+export const DEFAULT_UPLOAD_QUOTA_BYTES = 512 * 1024 * 1024;
 
 export type WorkspaceDirectoryEntry = {
   name: string;
@@ -30,10 +40,42 @@ export type StoredWorkspaceUpload = {
   fsPath: string;
 };
 
-export type AllowedWorkspaceFile = {
+export type OpenedAllowedWorkspaceFile = {
   path: string;
   downloadName: string;
   source: "upload" | "workspace";
+  stream: Readable;
+};
+
+export type UploadAccounting = {
+  quotaBytes: number;
+  retainedBytes: number;
+  inFlightBytes: number;
+  totalBytes: number;
+  peakBytes: number;
+};
+
+type UploadRecord = {
+  label: string;
+  storageName: string;
+  device: bigint;
+  inode: bigint;
+  bytes: number;
+};
+
+type ActiveUpload = {
+  source: NodeJS.ReadableStream;
+  storageName: string;
+  handle: FileHandle | null;
+  reservedBytes: number;
+  opened: Promise<void>;
+  markOpened: () => void;
+};
+
+type ClassifiedPath = {
+  requestedPath: string;
+  relativePath: string;
+  root: "browse" | "upload";
 };
 
 export class WorkspacePathError extends Error {
@@ -102,41 +144,31 @@ export function canonicalizeBrowseRoot(configuredRoot: string): string {
   return canonicalRoot;
 }
 
+export function parseUploadQuotaBytes(rawValue: string | undefined): number {
+  if (rawValue === undefined) {
+    return DEFAULT_UPLOAD_QUOTA_BYTES;
+  }
+  if (!/^\d+$/.test(rawValue)) {
+    throw new Error(
+      "CODEX_WEBUI_UPLOAD_QUOTA_BYTES must be a positive decimal safe integer",
+    );
+  }
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      "CODEX_WEBUI_UPLOAD_QUOTA_BYTES must be a positive decimal safe integer",
+    );
+  }
+  return parsed;
+}
+
 function hasTraversalSegment(value: string): boolean {
   return value.split(path.sep).includes("..");
 }
 
-function assertNoSymlinkSegments(
-  resolvedPath: string,
-  canonicalRoot: string,
-  label: string,
-): void {
-  const relative = path.relative(canonicalRoot, resolvedPath);
-  if (!isPathInside(resolvedPath, canonicalRoot)) {
-    throw new WorkspacePathError(
-      `${label} is outside CODEX_WEBUI_BROWSE_ROOT`,
-      403,
-    );
-  }
-
-  let current = canonicalRoot;
-  for (const segment of relative.split(path.sep).filter(Boolean)) {
-    current = path.join(current, segment);
-    let stat;
-    try {
-      stat = lstatSync(current);
-    } catch (error) {
-      if (fileSystemErrorCode(error) === "ENOENT") {
-        throw new WorkspacePathError(`${label} does not exist`, 404);
-      }
-      throw new WorkspacePathError(`${label} cannot be inspected`, 400);
-    }
-    if (stat.isSymbolicLink()) {
-      throw new WorkspacePathError(`${label} must not contain symlinks`, 403);
-    }
-  }
-}
-
+// This pathname-returning helper remains only for app-server cwd and root
+// sanitization. The separate Codex process consumes those strings later, so
+// descriptor continuity cannot cross that IPC boundary.
 export function resolveBoundedDirectory(
   input: string,
   canonicalRoot: string,
@@ -148,7 +180,6 @@ export function resolveBoundedDirectory(
   if (hasTraversalSegment(input)) {
     throw new WorkspacePathError(`${label} must not contain '..'`, 403);
   }
-
   const resolvedPath = path.resolve(input);
   if (!isPathInside(resolvedPath, canonicalRoot)) {
     throw new WorkspacePathError(
@@ -156,8 +187,25 @@ export function resolveBoundedDirectory(
       403,
     );
   }
-  assertNoSymlinkSegments(resolvedPath, canonicalRoot, label);
-
+  let current = canonicalRoot;
+  for (const segment of path
+    .relative(canonicalRoot, resolvedPath)
+    .split(path.sep)
+    .filter(Boolean)) {
+    current = path.join(current, segment);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch (error) {
+      if (fileSystemErrorCode(error) === "ENOENT") {
+        throw new WorkspacePathError(`${label} does not exist`, 404);
+      }
+      throw new WorkspacePathError(`${label} cannot be inspected`);
+    }
+    if (stat.isSymbolicLink()) {
+      throw new WorkspacePathError(`${label} must not contain symlinks`, 403);
+    }
+  }
   let canonicalPath: string;
   try {
     canonicalPath = realpathSync(resolvedPath);
@@ -194,44 +242,6 @@ function compareWorkspaceDirectoryEntries(
     return hiddenRank;
   }
   return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
-}
-
-export async function getWorkspaceDirectoryEntries(
-  directoryPath: string | null,
-  directoriesOnly: boolean,
-  canonicalRoot: string,
-): Promise<WorkspaceDirectoryEntries> {
-  const requestedPath = directoryPath?.trim() || canonicalRoot;
-  const resolvedPath = resolveBoundedDirectory(requestedPath, canonicalRoot);
-  const entries = (await fs.readdir(resolvedPath, { withFileTypes: true }))
-    .flatMap((entry): WorkspaceDirectoryEntry[] => {
-      // Symlinks are intentionally not picker entries. Direct requests are
-      // rejected by resolveBoundedDirectory as well.
-      if (entry.isSymbolicLink()) {
-        return [];
-      }
-      const type = entry.isDirectory() ? "directory" : "file";
-      if (directoriesOnly && type !== "directory") {
-        return [];
-      }
-      return [
-        {
-          name: entry.name,
-          path: path.join(resolvedPath, entry.name),
-          type,
-        },
-      ];
-    })
-    .sort(compareWorkspaceDirectoryEntries);
-
-  const parentCandidate = path.dirname(resolvedPath);
-  const parentPath =
-    resolvedPath === canonicalRoot ||
-    !isPathInside(parentCandidate, canonicalRoot)
-      ? null
-      : parentCandidate;
-
-  return { directoryPath: resolvedPath, parentPath, entries };
 }
 
 export function safeDownloadName(
@@ -274,80 +284,176 @@ export function contentTypeForWorkspaceFile(filename: string): string {
   );
 }
 
+function descriptorPath(handle: FileHandle, relativePath?: string): string {
+  const root = path.join("/proc/self/fd", String(handle.fd));
+  return relativePath ? path.join(root, relativePath) : root;
+}
+
+function descriptorTargetPath(target: string): string {
+  return target.endsWith(" (deleted)") ? target.slice(0, -10) : target;
+}
+
+function workspaceOpenError(error: unknown, label: string): WorkspacePathError {
+  const code = fileSystemErrorCode(error);
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return new WorkspacePathError(`${label} does not exist`, 404);
+  }
+  if (code === "EACCES" || code === "EPERM" || code === "ELOOP") {
+    return new WorkspacePathError(`${label} is not authorized`, 403);
+  }
+  return new WorkspacePathError(`${label} cannot be opened`);
+}
+
+async function closeHandle(handle: FileHandle | null): Promise<void> {
+  if (handle) {
+    await handle.close();
+  }
+}
+
 export class WorkspaceFileAuthority {
   readonly browseRoot: string;
   readonly runtimeRoot: string;
   readonly uploadRoot: string;
-  private readonly uploadedNames = new Map<string, string>();
+  readonly uploadQuotaBytes: number;
+
+  private readonly browseRootHandle: FileHandle;
+  private readonly uploadRootHandle: FileHandle;
+  private readonly uploadedFiles = new Map<string, UploadRecord>();
+  private readonly activeAuthorityOperations = new Set<Promise<void>>();
+  private readonly activeReadStreams = new Set<Readable>();
+  private readonly activeUploads = new Set<ActiveUpload>();
+  private retainedBytes = 0;
+  private inFlightBytes = 0;
+  private peakBytes = 0;
   private cleanedUp = false;
+  private cleanupPromise: Promise<void> | null = null;
 
   private constructor(
     browseRoot: string,
     runtimeRoot: string,
     uploadRoot: string,
+    uploadQuotaBytes: number,
+    browseRootHandle: FileHandle,
+    uploadRootHandle: FileHandle,
   ) {
     this.browseRoot = browseRoot;
     this.runtimeRoot = runtimeRoot;
     this.uploadRoot = uploadRoot;
+    this.uploadQuotaBytes = uploadQuotaBytes;
+    this.browseRootHandle = browseRootHandle;
+    this.uploadRootHandle = uploadRootHandle;
   }
 
   static async create(
     configuredRoot: string,
     temporaryParent = os.tmpdir(),
+    uploadQuotaBytes = DEFAULT_UPLOAD_QUOTA_BYTES,
   ): Promise<WorkspaceFileAuthority> {
-    const browseRoot = canonicalizeBrowseRoot(configuredRoot);
-    const runtimeRoot = await fs.mkdtemp(
-      path.join(temporaryParent, "codex-web-runtime-"),
-    );
-    const uploadRoot = path.join(runtimeRoot, "uploads");
-    await fs.mkdir(uploadRoot, { mode: 0o700 });
-    return new WorkspaceFileAuthority(
-      browseRoot,
-      realpathSync(runtimeRoot),
-      realpathSync(uploadRoot),
-    );
-  }
-
-  async storeUpload(
-    source: NodeJS.ReadableStream,
-    originalName: string | null | undefined,
-  ): Promise<StoredWorkspaceUpload> {
-    if (this.cleanedUp) {
-      throw new Error("Workspace upload runtime has been cleaned up");
+    if (!Number.isSafeInteger(uploadQuotaBytes) || uploadQuotaBytes <= 0) {
+      throw new Error("Upload quota must be a positive safe integer");
     }
-    const label = safeDownloadName(originalName, "upload");
-    const uploadedPath = path.join(this.uploadRoot, randomUUID());
+    const browseRoot = canonicalizeBrowseRoot(configuredRoot);
+    let browseRootHandle: FileHandle | null = null;
+    let uploadRootHandle: FileHandle | null = null;
+    let runtimeRoot: string | null = null;
     try {
-      await pipeline(
-        source,
-        createWriteStream(uploadedPath, { flags: "wx", mode: 0o600 }),
+      browseRootHandle = await fs.open(
+        browseRoot,
+        constants.O_RDONLY |
+          constants.O_DIRECTORY |
+          constants.O_NONBLOCK,
       );
-      const canonicalPath = realpathSync(uploadedPath);
-      this.uploadedNames.set(canonicalPath, label);
-      return { label, path: canonicalPath, fsPath: canonicalPath };
+      const browseStat = await browseRootHandle.stat();
+      const browseTarget = descriptorTargetPath(
+        await fs.readlink(descriptorPath(browseRootHandle)),
+      );
+      if (!browseStat.isDirectory() || browseTarget !== browseRoot) {
+        throw new Error(
+          "CODEX_WEBUI_BROWSE_ROOT changed while its authority was pinned",
+        );
+      }
+
+      runtimeRoot = await fs.mkdtemp(
+        path.join(temporaryParent, "codex-web-runtime-"),
+      );
+      const uploadRoot = path.join(runtimeRoot, "uploads");
+      await fs.mkdir(uploadRoot, { mode: 0o700 });
+      uploadRootHandle = await fs.open(
+        uploadRoot,
+        constants.O_RDONLY |
+          constants.O_DIRECTORY |
+          constants.O_NONBLOCK,
+      );
+      const uploadStat = await uploadRootHandle.stat();
+      const uploadTarget = descriptorTargetPath(
+        await fs.readlink(descriptorPath(uploadRootHandle)),
+      );
+      if (!uploadStat.isDirectory() || uploadTarget !== uploadRoot) {
+        throw new Error("Workspace upload root changed while it was pinned");
+      }
+
+      return new WorkspaceFileAuthority(
+        browseRoot,
+        runtimeRoot,
+        uploadRoot,
+        uploadQuotaBytes,
+        browseRootHandle,
+        uploadRootHandle,
+      );
     } catch (error) {
-      await fs.rm(uploadedPath, { force: true });
+      await Promise.allSettled([
+        closeHandle(uploadRootHandle),
+        closeHandle(browseRootHandle),
+      ]);
+      if (runtimeRoot) {
+        await fs.rm(runtimeRoot, { recursive: true, force: true });
+      }
       throw error;
     }
   }
 
-  async discardUpload(uploadedPath: string): Promise<void> {
-    let canonicalPath = uploadedPath;
-    try {
-      canonicalPath = realpathSync(uploadedPath);
-    } catch {
-      // The file may already have been removed after a failed multipart body.
-    }
-    if (!isPathInside(path.resolve(canonicalPath), this.uploadRoot)) {
-      throw new WorkspacePathError(
-        "Upload cleanup path is outside upload root",
-      );
-    }
-    this.uploadedNames.delete(canonicalPath);
-    await fs.rm(uploadedPath, { force: true });
+  getUploadAccounting(): UploadAccounting {
+    return {
+      quotaBytes: this.uploadQuotaBytes,
+      retainedBytes: this.retainedBytes,
+      inFlightBytes: this.inFlightBytes,
+      totalBytes: this.retainedBytes + this.inFlightBytes,
+      peakBytes: this.peakBytes,
+    };
   }
 
-  resolveAllowedFile(input: string): AllowedWorkspaceFile {
+  getActiveDescriptorState(): {
+    rootDescriptors: number;
+    readDescriptors: number;
+    uploadOperations: number;
+  } {
+    return {
+      rootDescriptors: this.cleanedUp ? 0 : 2,
+      readDescriptors: this.activeReadStreams.size,
+      uploadOperations: this.activeUploads.size,
+    };
+  }
+
+  private assertActive(): void {
+    if (this.cleanedUp) {
+      throw new Error("Workspace file authority has been cleaned up");
+    }
+  }
+
+  private beginAuthorityOperation(): () => void {
+    this.assertActive();
+    let finishOperation!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      finishOperation = resolve;
+    });
+    this.activeAuthorityOperations.add(completion);
+    return () => {
+      this.activeAuthorityOperations.delete(completion);
+      finishOperation();
+    };
+  }
+
+  private classifyPath(input: string, allowUpload: boolean): ClassifiedPath {
     if (!input || input.includes("\0") || !path.isAbsolute(input)) {
       throw new WorkspacePathError("File path must be absolute");
     }
@@ -355,56 +461,411 @@ export class WorkspaceFileAuthority {
       throw new WorkspacePathError("File path must not contain '..'", 403);
     }
 
-    const resolvedPath = path.resolve(input);
-    const isWorkspacePath = isPathInside(resolvedPath, this.browseRoot);
-    const isUploadPath = isPathInside(resolvedPath, this.uploadRoot);
-    if (!isWorkspacePath && !isUploadPath) {
+    const requestedPath = path.resolve(input);
+    if (allowUpload && isPathInside(requestedPath, this.uploadRoot)) {
+      return {
+        requestedPath,
+        relativePath: path.relative(this.uploadRoot, requestedPath),
+        root: "upload",
+      };
+    }
+    if (isPathInside(requestedPath, this.browseRoot)) {
+      return {
+        requestedPath,
+        relativePath: path.relative(this.browseRoot, requestedPath),
+        root: "browse",
+      };
+    }
+    throw new WorkspacePathError(
+      allowUpload
+        ? "File path is outside the allowed workspace and upload roots"
+        : "Workspace directory is outside CODEX_WEBUI_BROWSE_ROOT",
+      403,
+    );
+  }
+
+  private async validateOpenedTarget(
+    handle: FileHandle,
+    rootHandle: FileHandle,
+    relativePath: string,
+    label: string,
+  ): Promise<BigIntStats> {
+    const [openedStat, openedLink, rootLink] = await Promise.all([
+      handle.stat({ bigint: true }),
+      fs.readlink(descriptorPath(handle)),
+      fs.readlink(descriptorPath(rootHandle)),
+    ]);
+    const openedTarget = descriptorTargetPath(openedLink);
+    const rootTarget = descriptorTargetPath(rootLink);
+    if (
+      !path.isAbsolute(openedTarget) ||
+      !path.isAbsolute(rootTarget) ||
+      !isPathInside(openedTarget, rootTarget)
+    ) {
       throw new WorkspacePathError(
-        "File path is outside the allowed workspace and upload roots",
+        `${label} resolves outside its pinned authority root`,
         403,
       );
     }
+    const expectedTarget = relativePath
+      ? path.join(rootTarget, relativePath)
+      : rootTarget;
+    if (openedTarget !== expectedTarget) {
+      throw new WorkspacePathError(`${label} must not contain symlinks`, 403);
+    }
+    return openedStat;
+  }
 
-    const authorityRoot = isUploadPath ? this.uploadRoot : this.browseRoot;
-    assertNoSymlinkSegments(resolvedPath, authorityRoot, "File path");
-
-    let canonicalPath: string;
+  async getWorkspaceDirectoryEntries(
+    directoryPath: string | null,
+    directoriesOnly: boolean,
+  ): Promise<WorkspaceDirectoryEntries> {
+    this.assertActive();
+    const requested = directoryPath?.trim() || this.browseRoot;
+    const classified = this.classifyPath(requested, false);
+    const finishOperation = this.beginAuthorityOperation();
+    let handle: FileHandle | null = null;
     try {
-      canonicalPath = realpathSync(resolvedPath);
-    } catch (error) {
-      if (fileSystemErrorCode(error) === "ENOENT") {
-        throw new WorkspacePathError("File does not exist", 404);
+      try {
+        handle = await fs.open(
+          descriptorPath(this.browseRootHandle, classified.relativePath),
+          constants.O_RDONLY |
+            constants.O_DIRECTORY |
+            constants.O_NONBLOCK,
+        );
+      } catch (error) {
+        throw workspaceOpenError(error, "Workspace directory");
       }
-      throw new WorkspacePathError("File cannot be resolved");
+      const openedStat = await this.validateOpenedTarget(
+        handle,
+        this.browseRootHandle,
+        classified.relativePath,
+        "Workspace directory",
+      );
+      this.assertActive();
+      if (!openedStat.isDirectory()) {
+        throw new WorkspacePathError("Workspace directory is not a directory");
+      }
+
+      // Readdir is rooted at the already-open descriptor. The caller pathname
+      // is never reopened, so replacing it cannot change the consumed inode.
+      const directoryEntries = await fs.readdir(descriptorPath(handle), {
+        withFileTypes: true,
+      });
+      const entries = directoryEntries
+        .flatMap((entry: Dirent): WorkspaceDirectoryEntry[] => {
+          if (entry.isSymbolicLink()) {
+            return [];
+          }
+          const type = entry.isDirectory() ? "directory" : "file";
+          if (directoriesOnly && type !== "directory") {
+            return [];
+          }
+          return [
+            {
+              name: entry.name,
+              path: path.join(classified.requestedPath, entry.name),
+              type,
+            },
+          ];
+        })
+        .sort(compareWorkspaceDirectoryEntries);
+
+      const parentCandidate = path.dirname(classified.requestedPath);
+      const parentPath =
+        classified.requestedPath === this.browseRoot ||
+        !isPathInside(parentCandidate, this.browseRoot)
+          ? null
+          : parentCandidate;
+      return {
+        directoryPath: classified.requestedPath,
+        parentPath,
+        entries,
+      };
+    } finally {
+      try {
+        await closeHandle(handle);
+      } finally {
+        finishOperation();
+      }
     }
-    if (!isPathInside(canonicalPath, authorityRoot)) {
+  }
+
+  private reserveUploadBytes(bytes: number): void {
+    this.assertActive();
+    const nextTotal = this.retainedBytes + this.inFlightBytes + bytes;
+    if (nextTotal > this.uploadQuotaBytes) {
+      throw new WorkspacePathError("upload storage quota exceeded", 413);
+    }
+    this.inFlightBytes += bytes;
+    this.peakBytes = Math.max(this.peakBytes, nextTotal);
+  }
+
+  async storeUpload(
+    source: NodeJS.ReadableStream,
+    originalName: string | null | undefined,
+  ): Promise<StoredWorkspaceUpload> {
+    this.assertActive();
+    const label = safeDownloadName(originalName, "upload");
+    const storageName = randomUUID();
+    const uploadedPath = path.join(this.uploadRoot, storageName);
+    let markOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      markOpened = resolve;
+    });
+    const activeUpload: ActiveUpload = {
+      source,
+      storageName,
+      handle: null,
+      reservedBytes: 0,
+      opened,
+      markOpened,
+    };
+    this.activeUploads.add(activeUpload);
+    let handle: FileHandle | null = null;
+    try {
+      try {
+        handle = await fs.open(
+          descriptorPath(this.uploadRootHandle, storageName),
+          constants.O_WRONLY |
+            constants.O_CREAT |
+            constants.O_EXCL,
+          0o600,
+        );
+      } finally {
+        activeUpload.markOpened();
+      }
+      activeUpload.handle = handle;
+      this.assertActive();
+      const openedStat = await this.validateOpenedTarget(
+        handle,
+        this.uploadRootHandle,
+        storageName,
+        "Upload file",
+      );
+      if (!openedStat.isFile()) {
+        throw new Error("Upload storage target is not a regular file");
+      }
+
+      for await (const value of source as NodeJS.ReadableStream &
+        AsyncIterable<unknown>) {
+        const chunk =
+          typeof value === "string"
+            ? Buffer.from(value)
+            : Buffer.isBuffer(value)
+              ? value
+              : null;
+        if (!chunk) {
+          throw new Error("Upload stream produced a non-byte chunk");
+        }
+        this.reserveUploadBytes(chunk.byteLength);
+        activeUpload.reservedBytes += chunk.byteLength;
+        let offset = 0;
+        while (offset < chunk.byteLength) {
+          const result = await handle.write(
+            chunk,
+            offset,
+            chunk.byteLength - offset,
+            null,
+          );
+          if (result.bytesWritten <= 0) {
+            throw new Error("Upload write made no progress");
+          }
+          offset += result.bytesWritten;
+        }
+      }
+
+      const stat = await handle.stat({ bigint: true });
+      if (!stat.isFile() || stat.size !== BigInt(activeUpload.reservedBytes)) {
+        throw new Error("Stored upload identity or size is invalid");
+      }
+      await handle.close();
+      handle = null;
+      activeUpload.handle = null;
+      this.assertActive();
+
+      this.inFlightBytes -= activeUpload.reservedBytes;
+      this.retainedBytes += activeUpload.reservedBytes;
+      this.uploadedFiles.set(uploadedPath, {
+        label,
+        storageName,
+        device: stat.dev,
+        inode: stat.ino,
+        bytes: activeUpload.reservedBytes,
+      });
+      activeUpload.reservedBytes = 0;
+      return { label, path: uploadedPath, fsPath: uploadedPath };
+    } catch (error) {
+      this.inFlightBytes -= activeUpload.reservedBytes;
+      activeUpload.reservedBytes = 0;
+      await closeHandle(handle).catch(() => undefined);
+      handle = null;
+      activeUpload.handle = null;
+      await fs
+        .rm(descriptorPath(this.uploadRootHandle, storageName), { force: true })
+        .catch(() => undefined);
+      throw error;
+    } finally {
+      await closeHandle(handle).catch(() => undefined);
+      this.activeUploads.delete(activeUpload);
+    }
+  }
+
+  async discardUpload(uploadedPath: string): Promise<void> {
+    if (!uploadedPath || !path.isAbsolute(uploadedPath)) {
+      throw new WorkspacePathError("Upload cleanup path must be absolute");
+    }
+    const resolvedPath = path.resolve(uploadedPath);
+    if (!isPathInside(resolvedPath, this.uploadRoot)) {
       throw new WorkspacePathError(
-        "File resolves outside its allowed root",
-        403,
+        "Upload cleanup path is outside upload root",
       );
     }
-    if (isUploadPath && !this.uploadedNames.has(canonicalPath)) {
-      throw new WorkspacePathError("Upload file is not registered", 403);
-    }
-    if (!statSync(canonicalPath).isFile()) {
-      throw new WorkspacePathError("File path is not a regular file");
+    const record = this.uploadedFiles.get(resolvedPath);
+    if (!record) {
+      return;
     }
 
-    return {
-      path: canonicalPath,
-      downloadName: isUploadPath
-        ? this.uploadedNames.get(canonicalPath)!
-        : safeDownloadName(canonicalPath),
-      source: isUploadPath ? "upload" : "workspace",
-    };
+    this.uploadedFiles.delete(resolvedPath);
+    this.retainedBytes -= record.bytes;
+    try {
+      await fs.rm(descriptorPath(this.uploadRootHandle, record.storageName), {
+        force: true,
+      });
+    } catch (error) {
+      if (!this.cleanedUp && !this.uploadedFiles.has(resolvedPath)) {
+        this.uploadedFiles.set(resolvedPath, record);
+        this.retainedBytes += record.bytes;
+      }
+      throw error;
+    }
+  }
+
+  async openAllowedFile(input: string): Promise<OpenedAllowedWorkspaceFile> {
+    this.assertActive();
+    const classified = this.classifyPath(input, true);
+    const finishOperation = this.beginAuthorityOperation();
+    const rootHandle =
+      classified.root === "upload"
+        ? this.uploadRootHandle
+        : this.browseRootHandle;
+    let handle: FileHandle | null = null;
+    try {
+      try {
+        handle = await fs.open(
+          descriptorPath(rootHandle, classified.relativePath),
+          constants.O_RDONLY | constants.O_NONBLOCK,
+        );
+      } catch (error) {
+        throw workspaceOpenError(error, "File path");
+      }
+      const stat = await this.validateOpenedTarget(
+        handle,
+        rootHandle,
+        classified.relativePath,
+        "File",
+      );
+      this.assertActive();
+      if (!stat.isFile()) {
+        throw new WorkspacePathError("File path is not a regular file");
+      }
+
+      let downloadName: string;
+      if (classified.root === "upload") {
+        const record = this.uploadedFiles.get(classified.requestedPath);
+        if (!record) {
+          throw new WorkspacePathError("Upload file is not registered", 403);
+        }
+        if (
+          record.device !== stat.dev ||
+          record.inode !== stat.ino ||
+          BigInt(record.bytes) !== stat.size
+        ) {
+          throw new WorkspacePathError(
+            "Upload file identity no longer matches its registration",
+            403,
+          );
+        }
+        downloadName = record.label;
+      } else {
+        downloadName = safeDownloadName(classified.requestedPath);
+      }
+
+      const stream = handle.createReadStream({ autoClose: true });
+      handle = null;
+      this.activeReadStreams.add(stream);
+      stream.once("close", () => this.activeReadStreams.delete(stream));
+      return {
+        path: classified.requestedPath,
+        downloadName,
+        source: classified.root === "upload" ? "upload" : "workspace",
+        stream,
+      };
+    } catch (error) {
+      await closeHandle(handle).catch(() => undefined);
+      throw error;
+    } finally {
+      finishOperation();
+    }
   }
 
   async cleanup(): Promise<void> {
-    if (this.cleanedUp) {
-      return;
+    if (this.cleanupPromise) {
+      return this.cleanupPromise;
     }
     this.cleanedUp = true;
-    this.uploadedNames.clear();
-    await fs.rm(this.runtimeRoot, { recursive: true, force: true });
+    this.cleanupPromise = (async () => {
+      await Promise.all([...this.activeAuthorityOperations]);
+      const readCompletions = [...this.activeReadStreams].map((stream) =>
+        finished(stream).catch(() => undefined),
+      );
+      for (const stream of this.activeReadStreams) {
+        stream.destroy(new Error("Workspace file authority is shutting down"));
+      }
+      for (const upload of this.activeUploads) {
+        const destroy = (upload.source as NodeJS.ReadableStream & {
+          destroy?: (error?: Error) => void;
+        }).destroy;
+        destroy?.call(upload.source);
+        this.inFlightBytes -= upload.reservedBytes;
+        upload.reservedBytes = 0;
+      }
+      const uploadClosures = [...this.activeUploads].map(async (upload) => {
+        await upload.opened;
+        await closeHandle(upload.handle).catch(() => undefined);
+        upload.handle = null;
+        await fs
+          .rm(descriptorPath(this.uploadRootHandle, upload.storageName), {
+            force: true,
+          })
+          .catch(() => undefined);
+      });
+      await Promise.all([
+        ...readCompletions,
+        ...uploadClosures,
+      ]);
+      this.activeUploads.clear();
+
+      this.uploadedFiles.clear();
+      this.retainedBytes = 0;
+      this.inFlightBytes = 0;
+      const errors: unknown[] = [];
+      try {
+        await fs.rm(this.runtimeRoot, { recursive: true, force: true });
+      } catch (error) {
+        errors.push(error);
+      }
+      for (const handle of [this.uploadRootHandle, this.browseRootHandle]) {
+        try {
+          await handle.close();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "Workspace file authority cleanup failed");
+      }
+    })();
+    return this.cleanupPromise;
   }
 }

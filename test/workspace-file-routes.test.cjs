@@ -1,8 +1,11 @@
 const assert = require("node:assert/strict");
+const { randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { Readable } = require("node:stream");
 const test = require("node:test");
 const Fastify = require("fastify");
 const {
@@ -13,7 +16,7 @@ const {
   WorkspaceFileAuthority,
 } = require("../src/server/workspace-files.js");
 
-async function serverFixture(t) {
+async function serverFixture(t, uploadQuotaBytes) {
   const temporaryRoot = await fsp.mkdtemp(
     path.join(os.tmpdir(), "codex-web-workspace-routes-test-"),
   );
@@ -34,6 +37,7 @@ async function serverFixture(t) {
   const authority = await WorkspaceFileAuthority.create(
     browseRoot,
     temporaryRoot,
+    uploadQuotaBytes,
   );
   const app = Fastify({ logger: false });
   await registerWorkspaceFileRoutes(app, authority);
@@ -54,6 +58,39 @@ async function serverFixture(t) {
     temporaryRoot,
     workspaceFile,
   };
+}
+
+async function waitFor(label, predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+function streamingMultipart(boundary, filename, bytes, waitBeforeEnding) {
+  return Readable.from(
+    (async function* () {
+      yield Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      );
+      yield bytes;
+      if (waitBeforeEnding) await waitBeforeEnding;
+      yield Buffer.from(`\r\n--${boundary}--\r\n`);
+    })(),
+  );
+}
+
+async function streamingUpload(baseUrl, filename, bytes, waitBeforeEnding) {
+  const boundary = `codex-web-${randomUUID()}`;
+  return fetch(`${baseUrl}/__backend/upload`, {
+    method: "POST",
+    headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+    body: streamingMultipart(boundary, filename, bytes, waitBeforeEnding),
+    duplex: "half",
+  });
 }
 
 async function upload(baseUrl, files, field) {
@@ -147,6 +184,7 @@ test("multipart rejects per-file size, file count, fields, and excess parts", as
   ]);
   assert.equal(oversized.status, 413);
   assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
 
   const tooMany = await upload(
     item.baseUrl,
@@ -157,6 +195,7 @@ test("multipart rejects per-file size, file count, fields, and excess parts", as
   );
   assert.equal(tooMany.status, 413);
   assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
 
   const withField = await upload(
     item.baseUrl,
@@ -165,6 +204,108 @@ test("multipart rejects per-file size, file count, fields, and excess parts", as
   );
   assert.notEqual(withField.status, 200);
   assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
+});
+
+test("concurrent HTTP uploads share one quota and quota exhaustion is a bounded 413", async (t) => {
+  const item = await serverFixture(t, 10);
+  let releaseFirst;
+  const firstEnding = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const firstResponsePromise = streamingUpload(
+    item.baseUrl,
+    "first.bin",
+    Buffer.alloc(6, 0x61),
+    firstEnding,
+  );
+  await waitFor(
+    "first HTTP upload reservation",
+    () => item.authority.getUploadAccounting().inFlightBytes === 6,
+  );
+
+  const secondResponse = await streamingUpload(
+    item.baseUrl,
+    "second.bin",
+    Buffer.alloc(5, 0x62),
+  );
+  assert.equal(secondResponse.status, 413);
+  const secondBody = await secondResponse.json();
+  assert.deepEqual(secondBody, { error: "upload storage quota exceeded" });
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 6);
+  assert.equal(item.authority.getUploadAccounting().peakBytes, 6);
+
+  releaseFirst();
+  const firstResponse = await firstResponsePromise;
+  assert.equal(firstResponse.status, 200);
+  const firstBody = await firstResponse.json();
+  assert.equal(firstBody.files.length, 1);
+  assert.equal(item.authority.getUploadAccounting().retainedBytes, 6);
+  assert.equal((await fsp.readdir(item.authority.uploadRoot)).length, 1);
+
+  await item.authority.discardUpload(firstBody.files[0].path);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
+  assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+});
+
+test("client request abort removes the incomplete file and releases in-flight quota", async (t) => {
+  const item = await serverFixture(t, 64);
+  const boundary = `codex-web-${randomUUID()}`;
+  const url = new URL("/__backend/upload", item.baseUrl);
+  const request = http.request({
+    hostname: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: "POST",
+    headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+  });
+  request.on("error", () => undefined);
+  request.write(
+    `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="aborted.bin"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+  );
+  request.write(Buffer.alloc(7, 0x61));
+  await waitFor(
+    "aborted request upload reservation",
+    () => item.authority.getUploadAccounting().inFlightBytes === 7,
+  );
+  request.destroy();
+
+  await waitFor("aborted request quota rollback", async () => {
+    return (
+      item.authority.getUploadAccounting().totalBytes === 0 &&
+      (await fsp.readdir(item.authority.uploadRoot)).length === 0 &&
+      item.authority.getActiveDescriptorState().uploadOperations === 0
+    );
+  });
+  assert.equal(item.authority.getUploadAccounting().peakBytes, 7);
+});
+
+test("aborted download response closes its opened file descriptor", async (t) => {
+  const item = await serverFixture(t);
+  const largeFile = path.join(item.browseRoot, "large.bin");
+  await fsp.writeFile(largeFile, Buffer.alloc(2 * 1024 * 1024, 0x61));
+  const url = new URL(
+    `/__backend/download?path=${encodeURIComponent(largeFile)}`,
+    item.baseUrl,
+  );
+
+  await new Promise((resolve, reject) => {
+    const request = http.get(url, (response) => {
+      response.once("data", () => {
+        response.destroy();
+        resolve();
+      });
+      response.once("error", (error) => {
+        if (error.code === "ECONNRESET") resolve();
+        else reject(error);
+      });
+    });
+    request.once("error", reject);
+  });
+  await waitFor(
+    "aborted response descriptor close",
+    () => item.authority.getActiveDescriptorState().readDescriptors === 0,
+  );
 });
 
 test("/@fs keeps only raster images inline and forces active content to download", async (t) => {

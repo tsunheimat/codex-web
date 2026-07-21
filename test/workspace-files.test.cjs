@@ -3,15 +3,18 @@ const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { once } = require("node:events");
 const { Readable } = require("node:stream");
 const test = require("node:test");
 const {
   attachmentContentDisposition,
   canonicalizeBrowseRoot,
-  getWorkspaceDirectoryEntries,
+  DEFAULT_UPLOAD_QUOTA_BYTES,
+  parseUploadQuotaBytes,
   resolveBoundedDirectory,
   safeDownloadName,
   WorkspaceFileAuthority,
+  WorkspacePathError,
 } = require("../src/server/workspace-files.js");
 
 async function fixture() {
@@ -32,7 +35,44 @@ async function fixture() {
     fsp.writeFile(path.join(outsideRoot, "secret.txt"), "outside"),
   ]);
   await fsp.symlink(outsideRoot, path.join(browseRoot, "escape-link"));
+  await fsp.symlink(
+    path.join(outsideRoot, "secret.txt"),
+    path.join(browseRoot, "escape-file"),
+  );
   return { browseRoot, outsideRoot, temporaryRoot };
+}
+
+async function authorityFixture(t, quota = DEFAULT_UPLOAD_QUOTA_BYTES) {
+  const item = await fixture();
+  const authority = await WorkspaceFileAuthority.create(
+    item.browseRoot,
+    item.temporaryRoot,
+    quota,
+  );
+  t.after(async () => {
+    await authority.cleanup();
+    await fsp.rm(item.temporaryRoot, { recursive: true, force: true });
+  });
+  return { ...item, authority };
+}
+
+async function readStream(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+async function fdCount() {
+  return (await fsp.readdir("/proc/self/fd")).length;
+}
+
+async function waitFor(label, predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
 }
 
 test("canonicalizes the configured root and fails clearly for invalid roots", async (t) => {
@@ -49,13 +89,36 @@ test("canonicalizes the configured root and fails clearly for invalid roots", as
   );
 });
 
-test("bounds directory navigation, parent paths, symlinks, and ordering", async (t) => {
-  const item = await fixture();
-  t.after(() => fsp.rm(item.temporaryRoot, { recursive: true, force: true }));
-  const root = canonicalizeBrowseRoot(item.browseRoot);
+test("parses the exact default and only positive decimal safe upload quotas", () => {
+  assert.equal(parseUploadQuotaBytes(undefined), 512 * 1024 * 1024);
+  assert.equal(parseUploadQuotaBytes("1"), 1);
+  assert.equal(parseUploadQuotaBytes("00042"), 42);
+  assert.equal(parseUploadQuotaBytes(String(Number.MAX_SAFE_INTEGER)), Number.MAX_SAFE_INTEGER);
+  for (const invalid of [
+    "",
+    "0",
+    "-1",
+    "+1",
+    "1.5",
+    " 1",
+    "1 ",
+    "1e3",
+    String(Number.MAX_SAFE_INTEGER + 1),
+  ]) {
+    assert.throws(
+      () => parseUploadQuotaBytes(invalid),
+      /positive decimal safe integer/,
+      invalid,
+    );
+  }
+});
 
-  const allEntries = await getWorkspaceDirectoryEntries(null, false, root);
-  assert.equal(allEntries.directoryPath, root);
+test("picker consumes the pinned directory authority and preserves bounded ordering", async (t) => {
+  const item = await authorityFixture(t);
+  const { authority } = item;
+
+  const allEntries = await authority.getWorkspaceDirectoryEntries(null, false);
+  assert.equal(allEntries.directoryPath, item.browseRoot);
   assert.equal(allEntries.parentPath, null);
   assert.deepEqual(
     allEntries.entries.map(({ name, type }) => [name, type]),
@@ -68,105 +131,310 @@ test("bounds directory navigation, parent paths, symlinks, and ordering", async 
     ],
   );
   assert.equal(
-    allEntries.entries.some(({ name }) => name === "escape-link"),
+    allEntries.entries.some(({ name }) => name.startsWith("escape-")),
     false,
   );
 
-  const directories = await getWorkspaceDirectoryEntries(null, true, root);
+  const directories = await authority.getWorkspaceDirectoryEntries(null, true);
   assert.deepEqual(
     directories.entries.map(({ name }) => name),
     ["alpha", "zeta", ".hidden-dir"],
   );
-  const nested = await getWorkspaceDirectoryEntries(
-    path.join(root, "alpha", "nested"),
+  const nested = await authority.getWorkspaceDirectoryEntries(
+    path.join(item.browseRoot, "alpha", "nested"),
     true,
-    root,
   );
-  assert.equal(nested.parentPath, path.join(root, "alpha"));
+  assert.equal(nested.parentPath, path.join(item.browseRoot, "alpha"));
 
-  assert.throws(
-    () => resolveBoundedDirectory(`${root}${path.sep}..`, root),
+  await assert.rejects(
+    authority.getWorkspaceDirectoryEntries(
+      `${item.browseRoot}${path.sep}..`,
+      false,
+    ),
     /must not contain '\.\.'/,
   );
-  assert.throws(
-    () => resolveBoundedDirectory(item.outsideRoot, root),
+  await assert.rejects(
+    authority.getWorkspaceDirectoryEntries(item.outsideRoot, false),
     /outside CODEX_WEBUI_BROWSE_ROOT/,
   );
-  assert.throws(
-    () => resolveBoundedDirectory(path.join(root, "a.txt"), root),
-    /not a directory/,
+  await assert.rejects(
+    authority.getWorkspaceDirectoryEntries(
+      path.join(item.browseRoot, "a.txt"),
+      false,
+    ),
+    /does not exist|not a directory/,
   );
+  await assert.rejects(
+    authority.getWorkspaceDirectoryEntries(
+      path.join(item.browseRoot, "escape-link"),
+      false,
+    ),
+    /outside its pinned authority root/,
+  );
+
+  // This helper is deliberately retained only for strings forwarded to the
+  // separate app-server process; it must keep its Phase 3 behavior.
   assert.throws(
-    () => resolveBoundedDirectory(path.join(root, "escape-link"), root),
+    () => resolveBoundedDirectory(path.join(item.browseRoot, "escape-link"), item.browseRoot),
     /must not contain symlinks/,
   );
 });
 
-test("stores uploads under random names and resolves only allowed regular files", async (t) => {
+test("browse and picker operations stay rooted in the lifetime-pinned inode", async (t) => {
+  const item = await authorityFixture(t);
+  const movedRoot = path.join(item.temporaryRoot, "original-browse");
+  await fsp.rename(item.browseRoot, movedRoot);
+  await fsp.mkdir(item.browseRoot);
+  await fsp.writeFile(path.join(item.browseRoot, "replacement.txt"), "replacement");
+
+  const entries = await item.authority.getWorkspaceDirectoryEntries(null, false);
+  assert.equal(entries.entries.some((entry) => entry.name === "a.txt"), true);
+  assert.equal(
+    entries.entries.some((entry) => entry.name === "replacement.txt"),
+    false,
+  );
+
+  const opened = await item.authority.openAllowedFile(
+    path.join(item.browseRoot, "a.txt"),
+  );
+  assert.equal((await readStream(opened.stream)).toString(), "workspace bytes");
+});
+
+test("opened workspace descriptor is consumed after deterministic pathname replacement", async (t) => {
+  const item = await authorityFixture(t);
+  const requestedPath = path.join(item.browseRoot, "a.txt");
+  const opened = await item.authority.openAllowedFile(requestedPath);
+
+  await fsp.rename(requestedPath, path.join(item.browseRoot, "authorized-inode.txt"));
+  await fsp.writeFile(requestedPath, "replacement outside decision");
+
+  assert.equal((await readStream(opened.stream)).toString(), "workspace bytes");
+  assert.equal(await fsp.readFile(requestedPath, "utf8"), "replacement outside decision");
+  assert.deepEqual(item.authority.getActiveDescriptorState(), {
+    rootDescriptors: 2,
+    readDescriptors: 0,
+    uploadOperations: 0,
+  });
+});
+
+test("actual-open validation rejects intermediate and final symlink escapes", async (t) => {
+  const item = await authorityFixture(t);
+  for (const escapedPath of [
+    path.join(item.browseRoot, "escape-link", "secret.txt"),
+    path.join(item.browseRoot, "escape-file"),
+  ]) {
+    await assert.rejects(
+      item.authority.openAllowedFile(escapedPath),
+      (error) =>
+        error instanceof WorkspacePathError &&
+        error.statusCode === 403 &&
+        /outside its pinned authority root/.test(error.message),
+    );
+  }
+  assert.equal(item.authority.getActiveDescriptorState().readDescriptors, 0);
+});
+
+test("uploads use random names, registered inode identity, and exact retained accounting", async (t) => {
+  const item = await authorityFixture(t, 64);
+  const upload = await item.authority.storeUpload(
+    Readable.from([Buffer.from("uploaded bytes")]),
+    "../../unsafe\r\nname.txt",
+  );
+  assert.equal(path.dirname(upload.path), item.authority.uploadRoot);
+  assert.notEqual(path.basename(upload.path), "unsafe_name.txt");
+  assert.equal(upload.label, "unsafe__name.txt");
+  assert.equal(await fsp.readFile(upload.path, "utf8"), "uploaded bytes");
+  assert.deepEqual(item.authority.getUploadAccounting(), {
+    quotaBytes: 64,
+    retainedBytes: 14,
+    inFlightBytes: 0,
+    totalBytes: 14,
+    peakBytes: 14,
+  });
+
+  const openedUpload = await item.authority.openAllowedFile(upload.path);
+  assert.equal(openedUpload.downloadName, "unsafe__name.txt");
+  assert.equal(openedUpload.source, "upload");
+  assert.equal((await readStream(openedUpload.stream)).toString(), "uploaded bytes");
+
+  const originalInode = `${upload.path}.original`;
+  await fsp.rename(upload.path, originalInode);
+  await fsp.writeFile(upload.path, "different inode");
+  await assert.rejects(
+    item.authority.openAllowedFile(upload.path),
+    /identity no longer matches its registration/,
+  );
+
+  await item.authority.discardUpload(upload.path);
+  assert.equal(fs.existsSync(upload.path), false);
+  assert.deepEqual(item.authority.getUploadAccounting(), {
+    quotaBytes: 64,
+    retainedBytes: 0,
+    inFlightBytes: 0,
+    totalBytes: 0,
+    peakBytes: 14,
+  });
+  await item.authority.discardUpload(upload.path);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
+});
+
+test("aggregate concurrent reservations never oversubscribe process quota", async (t) => {
+  const item = await authorityFixture(t, 10);
+  let releaseFirst;
+  const firstMayFinish = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  t.after(() => releaseFirst());
+  const firstSource = Readable.from(
+    (async function* () {
+      yield Buffer.alloc(6, 0x61);
+      await firstMayFinish;
+    })(),
+  );
+  const firstUploadPromise = item.authority.storeUpload(firstSource, "first.bin");
+  await waitFor(
+    "first direct upload reservation",
+    () => item.authority.getUploadAccounting().inFlightBytes === 6,
+  );
+  assert.deepEqual(item.authority.getUploadAccounting(), {
+    quotaBytes: 10,
+    retainedBytes: 0,
+    inFlightBytes: 6,
+    totalBytes: 6,
+    peakBytes: 6,
+  });
+
+  await assert.rejects(
+    item.authority.storeUpload(Readable.from([Buffer.alloc(5)]), "second.bin"),
+    (error) => error instanceof WorkspacePathError && error.statusCode === 413,
+  );
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 6);
+  assert.equal(item.authority.getUploadAccounting().peakBytes, 6);
+
+  releaseFirst();
+  const firstUpload = await firstUploadPromise;
+  assert.equal(item.authority.getUploadAccounting().retainedBytes, 6);
+  assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), [
+    path.basename(firstUpload.path),
+  ]);
+  await item.authority.discardUpload(firstUpload.path);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
+  assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+});
+
+test("stream failure rolls back every byte and incomplete upload file exactly once", async (t) => {
+  const item = await authorityFixture(t, 64);
+  const failure = new Error("deterministic upload stream failure");
+  const source = Readable.from(
+    (async function* () {
+      yield Buffer.alloc(7);
+      throw failure;
+    })(),
+  );
+  await assert.rejects(item.authority.storeUpload(source, "failed.bin"), failure);
+  assert.deepEqual(item.authority.getUploadAccounting(), {
+    quotaBytes: 64,
+    retainedBytes: 0,
+    inFlightBytes: 0,
+    totalBytes: 0,
+    peakBytes: 7,
+  });
+  assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+  assert.equal(item.authority.getActiveDescriptorState().uploadOperations, 0);
+});
+
+test("rejections and destroyed reads close request descriptors and cleanup closes pinned roots", async (t) => {
   const item = await fixture();
+  t.after(() => fsp.rm(item.temporaryRoot, { recursive: true, force: true }));
+  const baseline = await fdCount();
   const authority = await WorkspaceFileAuthority.create(
     item.browseRoot,
     item.temporaryRoot,
   );
-  t.after(() => fsp.rm(item.temporaryRoot, { recursive: true, force: true }));
+  assert.equal(await fdCount(), baseline + 2);
 
-  const upload = await authority.storeUpload(
-    Readable.from([Buffer.from("uploaded bytes")]),
-    "../../unsafe\r\nname.txt",
+  await assert.rejects(
+    authority.openAllowedFile(path.join(item.browseRoot, "escape-file")),
+    /outside its pinned authority root/,
   );
-  assert.equal(path.dirname(upload.path), authority.uploadRoot);
-  assert.notEqual(path.basename(upload.path), "unsafe_name.txt");
-  assert.equal(upload.label, "unsafe__name.txt");
-  assert.equal(await fsp.readFile(upload.path, "utf8"), "uploaded bytes");
-  assert.deepEqual(authority.resolveAllowedFile(upload.path), {
-    path: upload.path,
-    downloadName: "unsafe__name.txt",
-    source: "upload",
-  });
+  assert.equal(await fdCount(), baseline + 2);
 
-  const workspaceFile = path.join(item.browseRoot, "a.txt");
-  assert.deepEqual(authority.resolveAllowedFile(workspaceFile), {
-    path: workspaceFile,
-    downloadName: "a.txt",
-    source: "workspace",
-  });
-  assert.throws(
-    () => authority.resolveAllowedFile(item.outsideRoot),
-    /outside the allowed workspace and upload roots/,
-  );
-  assert.throws(
-    () => authority.resolveAllowedFile(path.join(item.browseRoot, "alpha")),
-    /not a regular file/,
-  );
-  assert.throws(
-    () => authority.resolveAllowedFile(path.join(item.browseRoot, "missing")),
-    /does not exist/,
-  );
-  assert.throws(
-    () =>
-      authority.resolveAllowedFile(
-        `${item.browseRoot}${path.sep}alpha${path.sep}..${path.sep}a.txt`,
-      ),
-    /must not contain '\.\.'/,
-  );
-  assert.throws(
-    () =>
-      authority.resolveAllowedFile(
-        path.join(item.browseRoot, "escape-link", "secret.txt"),
-      ),
-    /must not contain symlinks/,
-  );
-
-  const unregistered = path.join(authority.uploadRoot, "not-registered");
-  await fsp.writeFile(unregistered, "unregistered");
-  assert.throws(
-    () => authority.resolveAllowedFile(unregistered),
-    /not registered/,
-  );
+  const opened = await authority.openAllowedFile(path.join(item.browseRoot, "a.txt"));
+  const closed = once(opened.stream, "close");
+  opened.stream.destroy();
+  await closed;
+  assert.equal(await fdCount(), baseline + 2);
+  assert.equal(authority.getActiveDescriptorState().readDescriptors, 0);
 
   const runtimeRoot = authority.runtimeRoot;
   await authority.cleanup();
+  assert.equal(await fdCount(), baseline);
   assert.equal(fs.existsSync(runtimeRoot), false);
+  assert.deepEqual(authority.getActiveDescriptorState(), {
+    rootDescriptors: 0,
+    readDescriptors: 0,
+    uploadOperations: 0,
+  });
+});
+
+test("cleanup force-closes a stalled upload descriptor without waiting for its producer", async (t) => {
+  const item = await fixture();
+  t.after(() => fsp.rm(item.temporaryRoot, { recursive: true, force: true }));
+  const baseline = await fdCount();
+  const authority = await WorkspaceFileAuthority.create(
+    item.browseRoot,
+    item.temporaryRoot,
+    64,
+  );
+  let releaseProducer;
+  const producerGate = new Promise((resolve) => {
+    releaseProducer = resolve;
+  });
+  t.after(() => releaseProducer());
+  const storeResult = authority
+    .storeUpload(
+      Readable.from(
+        (async function* () {
+          yield Buffer.alloc(4);
+          await producerGate;
+        })(),
+      ),
+      "stalled.bin",
+    )
+    .then(
+      () => null,
+      (error) => error,
+    );
+  await waitFor(
+    "stalled upload reservation",
+    () => authority.getUploadAccounting().inFlightBytes === 4,
+  );
+  const runtimeRoot = authority.runtimeRoot;
+  let cleanupTimeout;
+  try {
+    await Promise.race([
+      authority.cleanup(),
+      new Promise((_, reject) => {
+        cleanupTimeout = setTimeout(
+          () => reject(new Error("authority cleanup stalled")),
+          2_000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(cleanupTimeout);
+  }
+  assert.equal(await fdCount(), baseline);
+  assert.equal(fs.existsSync(runtimeRoot), false);
+  assert.equal(authority.getUploadAccounting().totalBytes, 0);
+  assert.deepEqual(authority.getActiveDescriptorState(), {
+    rootDescriptors: 0,
+    readDescriptors: 0,
+    uploadOperations: 0,
+  });
+
+  releaseProducer();
+  assert(await storeResult);
 });
 
 test("sanitizes download labels and produces injection-safe content disposition", () => {

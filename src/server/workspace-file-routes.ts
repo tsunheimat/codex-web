@@ -1,6 +1,6 @@
-import { createReadStream } from "node:fs";
 import fastifyMultipart from "@fastify/multipart";
 import type { FastifyInstance, FastifyReply } from "fastify";
+import type { Readable } from "node:stream";
 import {
   attachmentContentDisposition,
   contentTypeForWorkspaceFile,
@@ -50,6 +50,20 @@ export async function registerWorkspaceFileRoutes(
     const storedFiles: Awaited<
       ReturnType<WorkspaceFileAuthority["storeUpload"]>
     >[] = [];
+    let responseFinished = false;
+    const rollbackOnAbortedResponse = (): void => {
+      if (responseFinished || reply.raw.writableFinished) {
+        return;
+      }
+      void Promise.allSettled(
+        storedFiles.map((file) => authority.discardUpload(file.path)),
+      );
+    };
+    reply.raw.once("close", rollbackOnAbortedResponse);
+    reply.raw.once("finish", () => {
+      responseFinished = true;
+      reply.raw.off("close", rollbackOnAbortedResponse);
+    });
     try {
       for await (const part of request.parts()) {
         if (part.type !== "file" || part.fieldname !== "files") {
@@ -68,7 +82,7 @@ export async function registerWorkspaceFileRoutes(
       await Promise.all(
         storedFiles.map((file) => authority.discardUpload(file.path)),
       );
-      throw error;
+      return workspaceErrorReply(error, reply);
     }
 
     if (storedFiles.length === 0) {
@@ -84,8 +98,10 @@ export async function registerWorkspaceFileRoutes(
     if (typeof query.path !== "string") {
       return reply.code(400).send({ error: "download path is required" });
     }
+    let openedStream: Readable | null = null;
     try {
-      const file = authority.resolveAllowedFile(query.path);
+      const file = await authority.openAllowedFile(query.path);
+      openedStream = file.stream;
       return reply
         .header(
           "content-disposition",
@@ -93,16 +109,19 @@ export async function registerWorkspaceFileRoutes(
         )
         .header("x-content-type-options", "nosniff")
         .type("application/octet-stream")
-        .send(createReadStream(file.path));
+        .send(file.stream);
     } catch (error) {
+      openedStream?.destroy();
       return workspaceErrorReply(error, reply);
     }
   });
 
   app.get("/@fs/*", async (request, reply) => {
+    let openedStream: Readable | null = null;
     try {
       const requestedPath = workspacePathFromAtFsUrl(request.raw.url ?? "");
-      const file = authority.resolveAllowedFile(requestedPath);
+      const file = await authority.openAllowedFile(requestedPath);
+      openedStream = file.stream;
       const contentType = contentTypeForWorkspaceFile(file.downloadName);
       reply
         .header("content-security-policy", "sandbox; default-src 'none'")
@@ -114,8 +133,9 @@ export async function registerWorkspaceFileRoutes(
           attachmentContentDisposition(file.downloadName),
         );
       }
-      return reply.send(createReadStream(file.path));
+      return reply.send(file.stream);
     } catch {
+      openedStream?.destroy();
       // Static file authority is intentionally fail-closed without revealing
       // which host paths exist outside the configured roots.
       return reply.code(404).send({ error: "Not Found" });
