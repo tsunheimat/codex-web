@@ -1,11 +1,33 @@
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const http = require("node:http");
 const test = require("node:test");
 const WebSocket = require("ws");
 const {
+  BridgeEvidenceConnection,
   terminalTurnStatusFromBridgeMessage,
   waitForAuthoritativeTerminalTurnViaCodexWeb,
 } = require("./fixtures/codex-web-evidence-client.cjs");
+
+class FakeEvidenceSocket extends EventEmitter {
+  constructor({ completeSend = true } = {}) {
+    super();
+    this.completeSend = completeSend;
+    this.readyState = WebSocket.OPEN;
+    this.terminateCount = 0;
+  }
+
+  send(_message, _options, callback) {
+    if (this.completeSend) callback();
+  }
+
+  close() {}
+
+  terminate() {
+    this.terminateCount += 1;
+    this.readyState = WebSocket.CLOSED;
+  }
+}
 
 function bridgeResponse(requestId, threadId, turns) {
   return {
@@ -57,6 +79,60 @@ test("bridge terminal evidence binds the MCP envelope, request, thread and turn"
     );
   }
 });
+
+test(
+  "codex-web evidence send rejects and terminates its socket when the callback stalls",
+  { timeout: 2_000 },
+  async () => {
+    const socket = new FakeEvidenceSocket({ completeSend: false });
+    const unrelatedSocket = new FakeEvidenceSocket();
+    const connection = new BridgeEvidenceConnection(socket, Date.now() + 100);
+
+    await assert.rejects(
+      connection.sendJson({ type: "bridge-keepalive" }),
+      /timed out sending codex-web evidence frame/,
+    );
+    assert.equal(socket.terminateCount, 1);
+    assert.equal(unrelatedSocket.terminateCount, 0);
+  },
+);
+
+test(
+  "codex-web evidence response wait rejects and terminates its socket at the deadline",
+  { timeout: 2_000 },
+  async () => {
+    const socket = new FakeEvidenceSocket();
+    const connection = new BridgeEvidenceConnection(socket, Date.now() + 100);
+
+    await assert.rejects(
+      connection.readThread({
+        invokeRequestId: "invoke-a",
+        requestId: "request-a",
+        threadId: "thread-a",
+        sourceUrl: "http://127.0.0.1/thread/thread-a",
+      }),
+      /timed out waiting for authoritative thread\/read/,
+    );
+    assert.equal(socket.terminateCount, 1);
+  },
+);
+
+test(
+  "codex-web evidence disconnect rejects and terminates its socket at the deadline",
+  { timeout: 2_000 },
+  async () => {
+    const socket = new FakeEvidenceSocket();
+    const unrelatedSocket = new FakeEvidenceSocket();
+    const connection = new BridgeEvidenceConnection(socket, Date.now() + 100);
+
+    await assert.rejects(
+      connection.close(),
+      /timed out closing codex-web evidence WebSocket/,
+    );
+    assert.equal(socket.terminateCount, 1);
+    assert.equal(unrelatedSocket.terminateCount, 0);
+  },
+);
 
 test("codex-web evidence client polls exact thread/read without starting a turn", async () => {
   const httpServer = http.createServer();
@@ -120,7 +196,6 @@ test("codex-web evidence client polls exact thread/read without starting a turn"
       turnId: "turn-a",
       maximumWaitMs: 2_000,
       pollIntervalMs: 1,
-      requestTimeoutMs: 1_000,
     });
 
     assert.equal(evidence.status, "completed");

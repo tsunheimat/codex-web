@@ -436,11 +436,62 @@ async function launchBrowser(profileDirectory, origin, diagnostics) {
   return page;
 }
 
-async function closeBrowser() {
+async function closeBrowserContextWithinDeadline(
+  context,
+  {
+    deadline,
+    ownedChromiumPids,
+    terminateProcess = (pid) => process.kill(pid, "SIGKILL"),
+  },
+) {
+  let timeout;
+  const timeoutError = new Error(
+    "timed out closing restart lifecycle Browser context",
+  );
+  const closePromise = Promise.resolve().then(() => context.close());
+  const timeoutPromise = new Promise((_, reject) => {
+    timeout = setTimeout(
+      () => {
+        reject(timeoutError);
+      },
+      Math.max(0, deadline - Date.now()),
+    );
+  });
+
+  try {
+    await Promise.race([closePromise, timeoutPromise]);
+  } catch (error) {
+    if (error !== timeoutError) throw error;
+    const terminationErrors = [];
+    for (const pid of ownedChromiumPids) {
+      try {
+        terminateProcess(pid);
+      } catch (terminationError) {
+        if (terminationError?.code !== "ESRCH") {
+          terminationErrors.push(terminationError);
+        }
+      }
+    }
+    if (terminationErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...terminationErrors],
+        "Browser close timed out and owned Chromium termination failed",
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function closeBrowser(ownedChromiumPids) {
   if (!browserContext) return;
   const context = browserContext;
   browserContext = null;
-  await context.close();
+  await closeBrowserContextWithinDeadline(context, {
+    deadline: Date.now() + 5_000,
+    ownedChromiumPids,
+  });
 }
 
 async function waitForComposer(page) {
@@ -554,6 +605,7 @@ async function main() {
     sockets: [],
   };
   const trackedPids = new Set();
+  const ownedChromiumPids = new Set();
   let provider = null;
   let appServer = null;
   let serverA = null;
@@ -753,6 +805,9 @@ async function main() {
 
     const origin = `http://127.0.0.1:${port}`;
     page = await launchBrowser(profile, origin, diagnostics);
+    for (const { pid, args } of descendantsOf(process.pid)) {
+      if (/chrome|chromium/i.test(args)) ownedChromiumPids.add(pid);
+    }
     const originalPage = page;
     await page.goto(origin, { waitUntil: "domcontentloaded" });
     await passFirstRunOnboarding(page);
@@ -1152,10 +1207,11 @@ async function main() {
     }
     if (browserContext) {
       for (const { pid, args } of descendantsOf(process.pid)) {
-        if (/chrome|chromium/i.test(args)) trackedPids.add(pid);
+        if (/chrome|chromium/i.test(args)) ownedChromiumPids.add(pid);
       }
     }
-    await closeBrowser().catch(() => undefined);
+    for (const pid of ownedChromiumPids) trackedPids.add(pid);
+    await closeBrowser(ownedChromiumPids).catch(() => undefined);
     await stopChild(serverA);
     await stopChild(serverB);
     await stopChild(appServer);
@@ -1262,10 +1318,14 @@ async function main() {
   }
 }
 
-main().then(
-  () => process.exit(0),
-  (error) => {
-    console.error(error);
-    process.exit(1);
-  },
-);
+if (require.main === module) {
+  main().then(
+    () => process.exit(0),
+    (error) => {
+      console.error(error);
+      process.exit(1);
+    },
+  );
+}
+
+module.exports = { closeBrowserContextWithinDeadline };

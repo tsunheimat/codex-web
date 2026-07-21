@@ -3,12 +3,34 @@ const fs = require("node:fs/promises");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const WebSocket = require("ws");
 const {
+  EvidenceConnection,
   terminalTurnStatusFromThreadReadResponse,
   waitForAuthoritativeTerminalTurn,
 } = require("./fixtures/app-server-evidence-client.cjs");
+
+class FakeEvidenceSocket extends EventEmitter {
+  constructor({ completeSend = true } = {}) {
+    super();
+    this.completeSend = completeSend;
+    this.readyState = WebSocket.OPEN;
+    this.terminateCount = 0;
+  }
+
+  send(_message, _options, callback) {
+    if (this.completeSend) callback();
+  }
+
+  close() {}
+
+  terminate() {
+    this.terminateCount += 1;
+    this.readyState = WebSocket.CLOSED;
+  }
+}
 
 function threadReadResponse(id, threadId, turns) {
   return { id, result: { thread: { id: threadId, turns } } };
@@ -99,6 +121,57 @@ test("terminal snapshot validation rejects mismatched and ambiguous evidence", (
   }
 });
 
+test(
+  "app-server evidence send rejects and terminates its socket when the callback stalls",
+  { timeout: 2_000 },
+  async () => {
+    const socket = new FakeEvidenceSocket({ completeSend: false });
+    const unrelatedSocket = new FakeEvidenceSocket();
+    const connection = new EvidenceConnection(socket, Date.now() + 100);
+
+    await assert.rejects(
+      connection.sendJson({ method: "initialized" }),
+      /timed out sending app-server evidence frame/,
+    );
+    assert.equal(socket.terminateCount, 1);
+    assert.equal(unrelatedSocket.terminateCount, 0);
+  },
+);
+
+test(
+  "app-server evidence response wait rejects and terminates its socket at the deadline",
+  { timeout: 2_000 },
+  async () => {
+    const socket = new FakeEvidenceSocket();
+    const connection = new EvidenceConnection(socket, Date.now() + 100);
+
+    await assert.rejects(
+      connection.request("request-a", "thread/read", {
+        threadId: "thread-a",
+      }),
+      /timed out waiting for thread\/read response/,
+    );
+    assert.equal(socket.terminateCount, 1);
+  },
+);
+
+test(
+  "app-server evidence close rejects and terminates its socket at the deadline",
+  { timeout: 2_000 },
+  async () => {
+    const socket = new FakeEvidenceSocket();
+    const unrelatedSocket = new FakeEvidenceSocket();
+    const connection = new EvidenceConnection(socket, Date.now() + 100);
+
+    await assert.rejects(
+      connection.close(),
+      /timed out closing app-server evidence WebSocket/,
+    );
+    assert.equal(socket.terminateCount, 1);
+    assert.equal(unrelatedSocket.terminateCount, 0);
+  },
+);
+
 test("Unix WebSocket evidence client handshakes, reads until terminal and closes", async () => {
   const tempRoot = await fs.mkdtemp(
     path.join(os.tmpdir(), "codex-web-evidence-client-"),
@@ -151,7 +224,6 @@ test("Unix WebSocket evidence client handshakes, reads until terminal and closes
       turnId: "turn-a",
       maximumWaitMs: 2_000,
       pollIntervalMs: 1,
-      requestTimeoutMs: 1_000,
     });
 
     assert.equal(evidence.status, "completed");

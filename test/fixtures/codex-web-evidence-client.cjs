@@ -49,8 +49,9 @@ function terminalTurnStatusFromBridgeMessage(
 }
 
 class BridgeEvidenceConnection {
-  constructor(socket) {
+  constructor(socket, deadline) {
     this.socket = socket;
+    this.deadline = deadline;
     this.fatalError = null;
     this.handshake = null;
     this.incomingMessageId = 0;
@@ -75,6 +76,22 @@ class BridgeEvidenceConnection {
     }
     this.handshake = null;
     this.pending = null;
+  }
+
+  timeout(description, reject, cleanup = () => undefined) {
+    return setTimeout(
+      () => {
+        cleanup();
+        const timeoutError = new Error(`timed out ${description}`);
+        try {
+          this.socket.terminate();
+        } catch (error) {
+          timeoutError.cause = error;
+        }
+        reject(timeoutError);
+      },
+      Math.max(0, this.deadline - Date.now()),
+    );
   }
 
   onMessage(data, isBinary) {
@@ -177,14 +194,14 @@ class BridgeEvidenceConnection {
     resolve(message);
   }
 
-  async open(connectionId, timeoutMs) {
+  async open(connectionId) {
     if (this.fatalError) throw this.fatalError;
     if (this.socket.readyState !== WebSocket.OPEN) {
       await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
+        let timeout;
+        const onTimeout = () => {
           cleanup();
-          reject(new Error("timed out opening codex-web evidence WebSocket"));
-        }, timeoutMs);
+        };
         const onOpen = () => {
           cleanup();
           resolve();
@@ -203,6 +220,11 @@ class BridgeEvidenceConnection {
           this.socket.off("error", onError);
           this.socket.off("close", onClose);
         };
+        timeout = this.timeout(
+          "opening codex-web evidence WebSocket",
+          reject,
+          onTimeout,
+        );
         this.socket.once("open", onOpen);
         this.socket.once("error", onError);
         this.socket.once("close", onClose);
@@ -210,39 +232,45 @@ class BridgeEvidenceConnection {
     }
 
     const serverEpoch = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.handshake?.connectionId !== connectionId) return;
-        this.handshake = null;
-        reject(new Error("timed out handshaking codex-web evidence bridge"));
-      }, timeoutMs);
+      const timeout = this.timeout(
+        "handshaking codex-web evidence bridge",
+        reject,
+        () => {
+          if (this.handshake?.connectionId !== connectionId) return;
+          this.handshake = null;
+        },
+      );
       this.handshake = { connectionId, reject, resolve, timeout };
     });
-    await this.sendJson({
-      type: "bridge-hello",
-      protocolVersion: 2,
-      connectionId,
-      serverEpoch: null,
-    });
+    serverEpoch.catch(() => undefined);
+    try {
+      await this.sendJson({
+        type: "bridge-hello",
+        protocolVersion: 2,
+        connectionId,
+        serverEpoch: null,
+      });
+    } catch (error) {
+      this.fail(error);
+      throw error;
+    }
     return await serverEpoch;
   }
 
-  async readThread({
-    invokeRequestId,
-    requestId,
-    threadId,
-    sourceUrl,
-    timeoutMs,
-  }) {
+  async readThread({ invokeRequestId, requestId, threadId, sourceUrl }) {
     if (this.fatalError) throw this.fatalError;
     if (this.pending) {
       throw new Error("codex-web evidence requests must be sequential");
     }
     const response = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.pending?.appServerRequestId !== requestId) return;
-        this.pending = null;
-        reject(new Error("timed out waiting for authoritative thread/read"));
-      }, timeoutMs);
+      const timeout = this.timeout(
+        "waiting for authoritative thread/read",
+        reject,
+        () => {
+          if (this.pending?.appServerRequestId !== requestId) return;
+          this.pending = null;
+        },
+      );
       this.pending = {
         appServerRequestId: requestId,
         invokeRequestId,
@@ -251,6 +279,7 @@ class BridgeEvidenceConnection {
         timeout,
       };
     });
+    response.catch(() => undefined);
 
     this.outgoingMessageId += 1;
     try {
@@ -278,6 +307,7 @@ class BridgeEvidenceConnection {
       });
     } catch (error) {
       this.fail(error);
+      throw error;
     }
     return await response;
   }
@@ -287,29 +317,59 @@ class BridgeEvidenceConnection {
       throw new Error("codex-web evidence WebSocket is not open");
     }
     await new Promise((resolve, reject) => {
-      this.socket.send(JSON.stringify(value), { binary: false }, (error) =>
-        error ? reject(error) : resolve(),
-      );
+      let settled = false;
+      let timeout;
+      const finish = (callback, result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        callback(result);
+      };
+      timeout = this.timeout("sending codex-web evidence frame", reject, () => {
+        settled = true;
+      });
+      try {
+        this.socket.send(JSON.stringify(value), { binary: false }, (error) =>
+          error ? finish(reject, error) : finish(resolve, undefined),
+        );
+      } catch (error) {
+        finish(reject, error);
+      }
     });
   }
 
-  async close(timeoutMs = 2_000) {
+  async close() {
     if (this.socket.readyState === WebSocket.CLOSED) return;
     if (this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.terminate();
       return;
     }
-    await this.sendJson({ type: "bridge-disconnect" }).catch(() => undefined);
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        this.socket.terminate();
+    let closeTimeout;
+    let cleanup;
+    let onClose;
+    const closed = new Promise((resolve, reject) => {
+      cleanup = () => this.socket.off("close", onClose);
+      onClose = () => {
+        clearTimeout(closeTimeout);
+        cleanup();
         resolve();
-      }, timeoutMs);
-      this.socket.once("close", () => {
-        clearTimeout(timeout);
-        resolve();
-      });
+      };
+      closeTimeout = this.timeout(
+        "closing codex-web evidence WebSocket",
+        reject,
+        cleanup,
+      );
+      this.socket.once("close", onClose);
     });
+    closed.catch(() => undefined);
+    try {
+      await this.sendJson({ type: "bridge-disconnect" });
+      await closed;
+    } catch (error) {
+      clearTimeout(closeTimeout);
+      cleanup();
+      throw error;
+    }
   }
 }
 
@@ -319,7 +379,6 @@ async function waitForAuthoritativeTerminalTurnViaCodexWeb({
   turnId,
   maximumWaitMs = 30_000,
   pollIntervalMs = 100,
-  requestTimeoutMs = 5_000,
 }) {
   validateNonEmptyString(baseUrl, "codex-web base URL");
   validateNonEmptyString(threadId, "target thread id");
@@ -345,17 +404,14 @@ async function waitForAuthoritativeTerminalTurnViaCodexWeb({
     maxPayload: MAX_PAYLOAD_BYTES,
     perMessageDeflate: false,
   });
-  const connection = new BridgeEvidenceConnection(socket);
+  const deadline = Date.now() + maximumWaitMs;
+  const connection = new BridgeEvidenceConnection(socket, deadline);
   const requestPrefix = `phase6-authoritative-evidence-${randomUUID()}`;
   const connectionId = `${requestPrefix}-bridge`;
-  const deadline = Date.now() + maximumWaitMs;
   let readCount = 0;
 
   try {
-    const serverEpoch = await connection.open(
-      connectionId,
-      Math.min(requestTimeoutMs, maximumWaitMs),
-    );
+    const serverEpoch = await connection.open(connectionId);
     while (Date.now() < deadline) {
       readCount += 1;
       const requestId = `${requestPrefix}-thread-read-${readCount}`;
@@ -364,10 +420,6 @@ async function waitForAuthoritativeTerminalTurnViaCodexWeb({
         requestId,
         threadId,
         sourceUrl,
-        timeoutMs: Math.min(
-          requestTimeoutMs,
-          Math.max(1, deadline - Date.now()),
-        ),
       });
       const status = terminalTurnStatusFromBridgeMessage(
         response,
@@ -394,6 +446,7 @@ async function waitForAuthoritativeTerminalTurnViaCodexWeb({
 }
 
 module.exports = {
+  BridgeEvidenceConnection,
   terminalTurnStatusFromBridgeMessage,
   waitForAuthoritativeTerminalTurnViaCodexWeb,
 };

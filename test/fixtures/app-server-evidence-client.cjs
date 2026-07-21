@@ -70,8 +70,9 @@ function delay(milliseconds) {
 }
 
 class EvidenceConnection {
-  constructor(socket) {
+  constructor(socket, deadline) {
     this.socket = socket;
+    this.deadline = deadline;
     this.pending = null;
     this.fatalError = null;
     socket.on("message", (data, isBinary) => this.onMessage(data, isBinary));
@@ -91,6 +92,22 @@ class EvidenceConnection {
     this.pending = null;
     clearTimeout(timeout);
     reject(failure);
+  }
+
+  timeout(description, reject, cleanup = () => undefined) {
+    return setTimeout(
+      () => {
+        cleanup();
+        const timeoutError = new Error(`timed out ${description}`);
+        try {
+          this.socket.terminate();
+        } catch (error) {
+          timeoutError.cause = error;
+        }
+        reject(timeoutError);
+      },
+      Math.max(0, this.deadline - Date.now()),
+    );
   }
 
   onMessage(data, isBinary) {
@@ -139,14 +156,14 @@ class EvidenceConnection {
     resolve(message);
   }
 
-  async waitForOpen(timeoutMs) {
+  async waitForOpen() {
     if (this.socket.readyState === WebSocket.OPEN) return;
     if (this.fatalError) throw this.fatalError;
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      let timeout;
+      const onTimeout = () => {
         cleanup();
-        reject(new Error("timed out opening app-server evidence WebSocket"));
-      }, timeoutMs);
+      };
       const onOpen = () => {
         cleanup();
         resolve();
@@ -165,6 +182,11 @@ class EvidenceConnection {
         this.socket.off("error", onError);
         this.socket.off("close", onClose);
       };
+      timeout = this.timeout(
+        "opening app-server evidence WebSocket",
+        reject,
+        onTimeout,
+      );
       this.socket.once("open", onOpen);
       this.socket.once("error", onError);
       this.socket.once("close", onClose);
@@ -175,23 +197,28 @@ class EvidenceConnection {
     await this.sendJson({ method });
   }
 
-  async request(id, method, params, timeoutMs) {
+  async request(id, method, params) {
     if (this.fatalError) throw this.fatalError;
     if (this.pending) {
       throw new Error("app-server evidence requests must be sequential");
     }
     const response = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.pending?.requestId !== id) return;
-        this.pending = null;
-        reject(new Error(`timed out waiting for ${method} response`));
-      }, timeoutMs);
+      const timeout = this.timeout(
+        `waiting for ${method} response`,
+        reject,
+        () => {
+          if (this.pending?.requestId !== id) return;
+          this.pending = null;
+        },
+      );
       this.pending = { requestId: id, resolve, reject, timeout };
     });
+    response.catch(() => undefined);
     try {
       await this.sendJson({ id, method, params });
     } catch (error) {
       this.fail(error);
+      throw error;
     }
     return await response;
   }
@@ -201,27 +228,51 @@ class EvidenceConnection {
       throw new Error("app-server evidence WebSocket is not open");
     }
     await new Promise((resolve, reject) => {
-      this.socket.send(JSON.stringify(message), { binary: false }, (error) =>
-        error ? reject(error) : resolve(),
+      let settled = false;
+      let timeout;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        callback(value);
+      };
+      timeout = this.timeout(
+        "sending app-server evidence frame",
+        reject,
+        () => {
+          settled = true;
+        },
       );
+      try {
+        this.socket.send(JSON.stringify(message), { binary: false }, (error) =>
+          error ? finish(reject, error) : finish(resolve, undefined),
+        );
+      } catch (error) {
+        finish(reject, error);
+      }
     });
   }
 
-  async close(timeoutMs = 2_000) {
+  async close() {
     if (this.socket.readyState === WebSocket.CLOSED) return;
     if (this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.terminate();
       return;
     }
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        this.socket.terminate();
-        resolve();
-      }, timeoutMs);
-      this.socket.once("close", () => {
+    await new Promise((resolve, reject) => {
+      let timeout;
+      const cleanup = () => this.socket.off("close", onClose);
+      const onClose = () => {
         clearTimeout(timeout);
+        cleanup();
         resolve();
-      });
+      };
+      timeout = this.timeout(
+        "closing app-server evidence WebSocket",
+        reject,
+        cleanup,
+      );
+      this.socket.once("close", onClose);
       this.socket.close(1000, "authoritative evidence complete");
     });
   }
@@ -233,7 +284,6 @@ async function waitForAuthoritativeTerminalTurn({
   turnId,
   maximumWaitMs = 30_000,
   pollIntervalMs = 100,
-  requestTimeoutMs = 5_000,
 }) {
   validateIdentifier(socketPath, "app-server socket path");
   validateIdentifier(threadId, "target thread id");
@@ -247,13 +297,13 @@ async function waitForAuthoritativeTerminalTurn({
     maxPayload: MAX_PAYLOAD_BYTES,
     perMessageDeflate: false,
   });
-  const connection = new EvidenceConnection(socket);
-  const requestPrefix = `phase4-authoritative-evidence-${randomUUID()}`;
   const deadline = Date.now() + maximumWaitMs;
+  const connection = new EvidenceConnection(socket, deadline);
+  const requestPrefix = `phase4-authoritative-evidence-${randomUUID()}`;
   let readCount = 0;
 
   try {
-    await connection.waitForOpen(Math.min(requestTimeoutMs, maximumWaitMs));
+    await connection.waitForOpen();
     const initializeId = `${requestPrefix}-initialize`;
     const initializeResponse = await connection.request(
       initializeId,
@@ -266,7 +316,6 @@ async function waitForAuthoritativeTerminalTurn({
         },
         capabilities: { experimentalApi: true },
       },
-      Math.min(requestTimeoutMs, Math.max(1, deadline - Date.now())),
     );
     if (
       initializeResponse.id !== initializeId ||
@@ -280,12 +329,10 @@ async function waitForAuthoritativeTerminalTurn({
     while (Date.now() < deadline) {
       readCount += 1;
       const requestId = `${requestPrefix}-thread-read-${readCount}`;
-      const response = await connection.request(
-        requestId,
-        "thread/read",
-        { threadId, includeTurns: true },
-        Math.min(requestTimeoutMs, Math.max(1, deadline - Date.now())),
-      );
+      const response = await connection.request(requestId, "thread/read", {
+        threadId,
+        includeTurns: true,
+      });
       const terminalStatus = terminalTurnStatusFromThreadReadResponse(
         response,
         requestId,
@@ -312,6 +359,7 @@ async function waitForAuthoritativeTerminalTurn({
 }
 
 module.exports = {
+  EvidenceConnection,
   terminalTurnStatusFromThreadReadResponse,
   waitForAuthoritativeTerminalTurn,
 };
