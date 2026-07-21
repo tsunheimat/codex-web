@@ -105,6 +105,7 @@ type IpcMainBridgeState = {
     responseSink?: (channel: string, args: unknown[]) => void,
   ) => Promise<unknown>;
   handleRendererSend?: (channel: string, args: unknown[]) => void;
+  shutdownDesktopApp?: () => Promise<void>;
 };
 
 type ServerCleanupAuthority = {
@@ -284,9 +285,16 @@ function createServerCleanupAuthority({
         cleanupErrors.push(error);
       }
 
+      try {
+        await bridgeState.shutdownDesktopApp?.();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+
       bridgeState.broadcastToRenderer = undefined;
       bridgeState.handleRendererInvoke = undefined;
       bridgeState.handleRendererSend = undefined;
+      bridgeState.shutdownDesktopApp = undefined;
       disposeRendererRecovery();
 
       try {

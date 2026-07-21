@@ -40,6 +40,7 @@ type IpcMainBridgeState = {
     args: unknown[],
     sourceUrl?: string,
   ) => void;
+  shutdownDesktopApp?: () => Promise<void>;
 };
 
 function getIpcMainBridgeState(): IpcMainBridgeState {
@@ -269,11 +270,27 @@ function createIpcMainStub(): {
 }
 
 let appReady = false;
+let desktopShutdownPromise: Promise<void> | null = null;
 const commandLineSwitches = new Map<string, string>();
 const commandLineArguments: string[] = [];
+const appEmitter = createEmitterStub("app");
+
+function shutdownDesktopApp(): Promise<void> {
+  if (desktopShutdownPromise) {
+    return desktopShutdownPromise;
+  }
+  desktopShutdownPromise = (async () => {
+    const event = { preventDefault: () => undefined };
+    appEmitter.emit("before-quit", event);
+    appEmitter.emit("will-quit", event);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    appEmitter.emit("quit", event, 0);
+  })();
+  return desktopShutdownPromise;
+}
 
 const appBase = {
-  ...createEmitterStub("app"),
+  ...appEmitter,
   name: "Codex",
   isPackaged: false,
   getName(): string {
@@ -356,18 +373,38 @@ const appBase = {
     },
   },
   on(event: string, listener: (...args: unknown[]) => void): unknown {
-    log("app.on", [event, listener]);
+    appEmitter.on(event, listener);
     return app;
   },
   once(event: string, listener: (...args: unknown[]) => void): unknown {
-    log("app.once", [event, listener]);
+    appEmitter.once(event, listener);
     return app;
+  },
+  addListener(event: string, listener: (...args: unknown[]) => void): unknown {
+    appEmitter.addListener(event, listener);
+    return app;
+  },
+  removeListener(
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): unknown {
+    appEmitter.removeListener(event, listener);
+    return app;
+  },
+  off(event: string, listener: (...args: unknown[]) => void): unknown {
+    appEmitter.off(event, listener);
+    return app;
+  },
+  emit(event: string, ...args: unknown[]): boolean {
+    return appEmitter.emit(event, ...args);
   },
   quit(): void {
     log("app.quit", []);
+    void shutdownDesktopApp();
   },
   exit(code?: number): void {
     log("app.exit", [code]);
+    void shutdownDesktopApp();
   },
 };
 
@@ -380,6 +417,8 @@ const app = new Proxy(appBase as Record<string, unknown>, {
     return createDeepStub(`app.${String(prop)}`);
   },
 }) as typeof appBase;
+
+getIpcMainBridgeState().shutdownDesktopApp = shutdownDesktopApp;
 
 class BrowserWindow {
   static nextId = 1;
@@ -559,6 +598,11 @@ class BrowserWindow {
 
   getBounds(): { height: number; width: number; x: number; y: number } {
     log(`BrowserWindow#${this.id}.getBounds`, []);
+    return { ...this.bounds };
+  }
+
+  getNormalBounds(): { height: number; width: number; x: number; y: number } {
+    log(`BrowserWindow#${this.id}.getNormalBounds`, []);
     return { ...this.bounds };
   }
 

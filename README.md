@@ -111,11 +111,34 @@ read or validation failures retry at a bounded cadence; after 15 seconds the
 renderer receives at most one fail-open history hydration so it cannot wait
 forever. That fallback reads history only and never starts or restarts a turn.
 
-These guarantees do not cover the default topology, where codex-web owns and
-terminates its app-server child; an app-server process restart; or the ambiguous
-window before the external app-server accepts a turn. They also do not provide
-raw bridge persistence, authentication, or HTTPS. Run authentication and TLS at
-the trusted-network boundary described below.
+These server-only restart guarantees do not make an in-flight turn survive the
+default topology, where codex-web owns and terminates its app-server child. They
+also do not cover an app-server crash or the ambiguous window before an external
+app-server accepts a turn.
+
+### controlled whole-instance restart
+
+The default owned-child topology supports an operator-controlled whole-instance
+restart only while idle. Persist `CODEX_HOME` and every required workspace path,
+wait until every accepted turn is terminal, gracefully stop codex-web and its
+owned app-server, and do not start the replacement until the old process tree
+has exited and the web listener is unavailable. The replacement creates a fresh
+app-server and runtime directory against the persisted state. An already-open
+Browser tab then consumes the same exact one-shot backend-restart marker and
+uses official thread history hydration to recover its canonical thread route;
+codex-web does not replay a bridge frame, renderer invoke, provider request or
+`turn/start`.
+
+On Kubernetes, use one non-overlapping owner for the persisted state: a
+single-replica Deployment with `strategy.type: Recreate`, or an equivalently
+ordered single-replica StatefulSet replacement. Do not use overlapping
+`RollingUpdate` Pods with the same `CODEX_HOME` or workspace volume. This is an
+operational lifecycle boundary, not a live deployment manifest.
+
+This controlled lifecycle does not promise active-turn migration, forced-crash
+continuation, pre-accept exactly-once behavior, zero downtime, or raw bridge
+persistence. Authentication and HTTPS remain the responsibility of the trusted
+reverse-proxy boundary described below.
 
 ## security
 
@@ -173,6 +196,7 @@ Linux host with `xvfb-run` available:
 npm run test:browser:install
 npm run test:browser
 npm run test:browser:restart
+npm run test:browser:pod-restart
 ```
 
 The test uses ordinary loopback HTTP, fresh browser profiles, and temporary
@@ -181,6 +205,15 @@ runtime directories, and fails if its child processes survive teardown.
 with the external WebSocket-over-Unix app-server topology; it keeps one real
 app-server alive across two sequential codex-web processes and uses a local
 deterministic Responses provider.
+
+`test:browser:pod-restart` requires exactly Codex CLI 0.144.6. It completes and
+authoritatively verifies a turn in server A's default owned app-server, proves
+the old server, app-server, listener and isolated runtime are gone, then starts
+server B with a distinct app-server and runtime against the same persisted
+`CODEX_HOME` and workspace. The same real Chromium page recovers the unique
+result from official history with one provider request and one accepted
+`turn/start`; teardown rejects process, listener, profile or temporary-root
+residue.
 
 ## issues welcome
 

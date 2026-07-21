@@ -10,14 +10,30 @@ const { chromium } = require("playwright");
 const {
   waitForAuthoritativeTerminalTurn,
 } = require("../test/fixtures/app-server-evidence-client.cjs");
+const {
+  waitForAuthoritativeTerminalTurnViaCodexWeb,
+} = require("../test/fixtures/codex-web-evidence-client.cjs");
 
 const repositoryRoot = path.resolve(__dirname, "..");
-const scenario = {
-  name: "server restart continuity",
-  token: "phase4-server-restart-request-31f72c",
-  output: "PHASE4_SERVER_RESTART_RESULT_B84E19",
-  delayMs: 4_000,
-};
+const restartTopology = process.env.CODEX_WEB_RESTART_TOPOLOGY ?? "external";
+assert(
+  restartTopology === "external" || restartTopology === "owned",
+  `unsupported restart topology: ${restartTopology}`,
+);
+const wholeInstanceRestart = restartTopology === "owned";
+const scenario = wholeInstanceRestart
+  ? {
+      name: "controlled whole-instance restart continuity",
+      token: "phase6-whole-instance-restart-request-4c82e1",
+      output: "PHASE6_WHOLE_INSTANCE_RESTART_RESULT_61A7D4",
+      delayMs: 4_000,
+    }
+  : {
+      name: "server restart continuity",
+      token: "phase4-server-restart-request-31f72c",
+      output: "PHASE4_SERVER_RESTART_RESULT_B84E19",
+      delayMs: 4_000,
+    };
 const children = new Set();
 const childLogs = new Map();
 let browserContext = null;
@@ -131,7 +147,9 @@ function processExists(pid) {
 }
 
 async function stopChild(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return { forced: false };
+  }
   child.kill("SIGTERM");
   const exited = await Promise.race([
     new Promise((resolve) => child.once("exit", () => resolve(true))),
@@ -140,7 +158,35 @@ async function stopChild(child) {
   if (!exited) {
     child.kill("SIGKILL");
     await new Promise((resolve) => child.once("exit", resolve));
+    return { forced: true };
   }
+  return { forced: false };
+}
+
+function ownedAppServerProcesses(parentPid) {
+  const candidates = descendantsOf(parentPid).filter(
+    ({ args }) =>
+      /(?:^|[ /])codex(?: |$)/.test(args) &&
+      /(?:^| )app-server(?: |$)/.test(args) &&
+      !/(?:^| )proxy(?: |$)/.test(args),
+  );
+  return candidates.map((candidate) => ({
+    ...candidate,
+    leaf: !candidates.some(({ ppid }) => ppid === candidate.pid),
+  }));
+}
+
+async function runtimeRoots(runtimeDirectory) {
+  return (await fs.readdir(runtimeDirectory))
+    .filter((entry) => entry.startsWith("codex-web-runtime-"))
+    .sort();
+}
+
+async function pathIsSocket(socketPath) {
+  return await fs
+    .stat(socketPath)
+    .then((stat) => stat.isSocket())
+    .catch(() => false);
 }
 
 async function unusedLoopbackPort() {
@@ -445,9 +491,14 @@ async function main() {
   const isolatedHome = path.join(tempRoot, "home");
   const codexHome = path.join(isolatedHome, ".codex");
   const workspace = path.join(tempRoot, "workspace");
-  const projectRoot = path.join(workspace, "phase4-project");
+  const projectRoot = path.join(
+    workspace,
+    wholeInstanceRestart ? "phase6-project" : "phase4-project",
+  );
   const profile = path.join(tempRoot, "chromium-profile");
   const runtime = path.join(tempRoot, "runtime");
+  const ownedRuntimeA = path.join(tempRoot, "runtime-a");
+  const ownedRuntimeB = path.join(tempRoot, "runtime-b");
   const socketPath = path.join(runtime, "codex-app-server.sock");
   const externalNetworkLog = path.join(tempRoot, "external-network.log");
   const diagnostics = {
@@ -465,12 +516,21 @@ async function main() {
   let serverA = null;
   let serverB = null;
   let page = null;
+  let port = null;
+  let appServerAPid = null;
+  let appServerBPid = null;
+  let runtimeRootA = null;
+  let runtimeRootB = null;
+  let serverAStoppedAt = null;
+  let serverBStartedAt = null;
 
   try {
     await Promise.all([
       fs.mkdir(codexHome, { recursive: true }),
       fs.mkdir(projectRoot, { recursive: true }),
       fs.mkdir(runtime, { recursive: true }),
+      fs.mkdir(ownedRuntimeA, { recursive: true }),
+      fs.mkdir(ownedRuntimeB, { recursive: true }),
       fs.mkdir(path.join(tempRoot, "tmp"), { recursive: true }),
       fs.mkdir(path.join(tempRoot, "xdg-cache"), { recursive: true }),
       fs.mkdir(path.join(tempRoot, "xdg-config"), { recursive: true }),
@@ -531,6 +591,17 @@ async function main() {
     );
 
     const codexExecutable = findExecutable("codex");
+    const codexVersion = spawnSync(codexExecutable, ["--version"], {
+      encoding: "utf8",
+    });
+    assert.equal(codexVersion.status, 0, codexVersion.stderr);
+    if (wholeInstanceRestart) {
+      assert.equal(
+        codexVersion.stdout.trim(),
+        "codex-cli 0.144.6",
+        "whole-instance restart witness requires exact Codex 0.144.6",
+      );
+    }
     const commonEnvironment = {
       PATH: process.env.PATH,
       LANG: process.env.LANG ?? "C.UTF-8",
@@ -553,50 +624,80 @@ async function main() {
       https_proxy: "http://127.0.0.1:9",
       CODEX_WEB_E2E_NETWORK_LOG: externalNetworkLog,
     };
-    appServer = captureChild(
-      spawn(
-        codexExecutable,
-        ["app-server", "--listen", `unix://${socketPath}`],
-        {
-          cwd: projectRoot,
-          env: commonEnvironment,
-          stdio: ["ignore", "pipe", "pipe"],
+    assert.deepEqual(await runtimeRoots(runtime), []);
+    if (!wholeInstanceRestart) {
+      appServer = captureChild(
+        spawn(
+          codexExecutable,
+          ["app-server", "--listen", `unix://${socketPath}`],
+          {
+            cwd: projectRoot,
+            env: commonEnvironment,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        ),
+        "external-app-server",
+      );
+      trackedPids.add(appServer.pid);
+      await waitFor(
+        "external app-server Unix socket",
+        async () => {
+          assert.equal(appServer.exitCode, null, childOutput(appServer));
+          return await fs
+            .stat(socketPath)
+            .then((stat) => stat.isSocket())
+            .catch(() => false);
         },
-      ),
-      "external-app-server",
-    );
-    trackedPids.add(appServer.pid);
-    await waitFor(
-      "external app-server Unix socket",
-      async () => {
-        assert.equal(appServer.exitCode, null, childOutput(appServer));
-        return await fs
-          .stat(socketPath)
-          .then((stat) => stat.isSocket())
-          .catch(() => false);
-      },
-      30_000,
-    );
+        30_000,
+      );
+    }
 
-    const port = await unusedLoopbackPort();
+    port = await unusedLoopbackPort();
     const serverEnvironment = {
       ...commonEnvironment,
-      CODEX_CLI_PATH: path.join(
-        repositoryRoot,
-        "test/fixtures/codex-app-server-proxy.cjs",
-      ),
+      CODEX_CLI_PATH: wholeInstanceRestart
+        ? codexExecutable
+        : path.join(repositoryRoot, "test/fixtures/codex-app-server-proxy.cjs"),
       CODEX_WEB_REAL_CODEX_PATH: codexExecutable,
-      CODEX_UNIX_SOCKET: socketPath,
       CODEX_WEBUI_BROWSE_ROOT: workspace,
+      ...(wholeInstanceRestart ? {} : { CODEX_UNIX_SOCKET: socketPath }),
     };
+    const serverAEnvironment = wholeInstanceRestart
+      ? { ...serverEnvironment, TMPDIR: ownedRuntimeA }
+      : serverEnvironment;
+    const serverBEnvironment = wholeInstanceRestart
+      ? { ...serverEnvironment, TMPDIR: ownedRuntimeB }
+      : serverEnvironment;
     serverA = spawnWebServer(
       port,
       projectRoot,
-      serverEnvironment,
+      serverAEnvironment,
       "codex-web-a",
     );
     trackedPids.add(serverA.pid);
     await waitForWebServer(port, serverA);
+
+    if (wholeInstanceRestart) {
+      const serverAAppServers = await waitFor(
+        "server A default owned app-server",
+        () => {
+          assert.equal(serverA.exitCode, null, childOutput(serverA));
+          const candidates = ownedAppServerProcesses(serverA.pid);
+          return candidates.some(({ leaf }) => leaf) ? candidates : null;
+        },
+        30_000,
+      );
+      for (const { pid } of descendantsOf(serverA.pid)) trackedPids.add(pid);
+      const leaf = serverAAppServers.find((candidate) => candidate.leaf);
+      assert(leaf, "server A app-server process tree had no leaf process");
+      appServerAPid = leaf.pid;
+      runtimeRootA = path.join(ownedRuntimeA, "codex-ipc");
+      await waitFor(
+        "server A isolated runtime socket",
+        () => pathIsSocket(path.join(runtimeRootA, "ipc.sock")),
+        30_000,
+      );
+    }
 
     const origin = `http://127.0.0.1:${port}`;
     page = await launchBrowser(profile, origin, diagnostics);
@@ -656,40 +757,112 @@ async function main() {
     );
     const navigationsBeforeRestart = diagnostics.mainFrameNavigations;
     const readyCountBeforeRestart = rendererReadyMessages(diagnostics).length;
-    for (const { pid } of descendantsOf(serverA.pid)) trackedPids.add(pid);
+    let authoritativeTerminalEvidence;
 
-    await stopChild(serverA);
-    assert.equal(
-      processExists(appServer.pid),
-      true,
-      "external app-server did not survive server A",
-    );
-    await waitFor(
-      "codex-web port to be unavailable before authoritative evidence",
-      () => loopbackPortIsUnavailable(port),
-      10_000,
-    );
-    await waitFor(
-      "provider completion while codex-web is unavailable",
-      async () => {
-        const state = await mockState(providerReady.baseUrl);
-        return state.scenarios[scenario.token]?.completedAt;
-      },
-      30_000,
-    );
+    if (wholeInstanceRestart) {
+      await waitFor(
+        "provider completion before controlled whole-instance shutdown",
+        async () => {
+          const state = await mockState(providerReady.baseUrl);
+          return state.scenarios[scenario.token]?.completedAt;
+        },
+        30_000,
+      );
+      await waitFor(
+        "complete assistant result before controlled whole-instance shutdown",
+        async () =>
+          (await page.locator("body").innerText()).includes(scenario.output),
+        30_000,
+      );
+      assert.equal(serverB, null, "server B started before terminal evidence");
+      authoritativeTerminalEvidence =
+        await waitForAuthoritativeTerminalTurnViaCodexWeb({
+          baseUrl: origin,
+          threadId,
+          turnId,
+        });
+      assert.equal(
+        authoritativeTerminalEvidence.serverEpoch,
+        oldReady.serverEpoch,
+        "terminal evidence did not come from server A",
+      );
+      assert.equal(
+        authoritativeTerminalEvidence.status,
+        "completed",
+        "controlled restart requires the exact successful turn to be terminal",
+      );
 
-    assert.equal(serverB, null, "server B started before terminal evidence");
-    assert.equal(
-      await loopbackPortIsUnavailable(port),
-      true,
-      "codex-web port became available before terminal evidence",
-    );
-    const authoritativeTerminalEvidence =
-      await waitForAuthoritativeTerminalTurn({
+      const serverADescendantPids = descendantsOf(serverA.pid).map(
+        ({ pid }) => pid,
+      );
+      for (const pid of serverADescendantPids) trackedPids.add(pid);
+      assert(
+        serverADescendantPids.includes(appServerAPid),
+        "server A no longer owned its recorded app-server before shutdown",
+      );
+      const stopResult = await stopChild(serverA);
+      assert.equal(stopResult.forced, false, "server A required SIGKILL");
+      assert.equal(serverA.exitCode, 0, childOutput(serverA));
+      await waitFor(
+        "server A owned process tree to exit",
+        () => serverADescendantPids.every((pid) => !processExists(pid)),
+        10_000,
+      );
+      await waitFor(
+        "server A web port to become unavailable",
+        () => loopbackPortIsUnavailable(port),
+        10_000,
+      );
+      await fs.rm(ownedRuntimeA, { recursive: true, force: true });
+      assert.equal(
+        await fs
+          .stat(ownedRuntimeA)
+          .then(() => true)
+          .catch(() => false),
+        false,
+        "server A disposable Pod runtime survived teardown",
+      );
+      assert.equal(
+        await pathIsSocket(path.join(runtimeRootA, "ipc.sock")),
+        false,
+      );
+      assert.equal(serverB, null, "server B overlapped server A teardown");
+      assert.equal(processExists(appServerAPid), false);
+      serverAStoppedAt = Date.now();
+    } else {
+      for (const { pid } of descendantsOf(serverA.pid)) trackedPids.add(pid);
+      await stopChild(serverA);
+      assert.equal(
+        processExists(appServer.pid),
+        true,
+        "external app-server did not survive server A",
+      );
+      await waitFor(
+        "codex-web port to be unavailable before authoritative evidence",
+        () => loopbackPortIsUnavailable(port),
+        10_000,
+      );
+      await waitFor(
+        "provider completion while codex-web is unavailable",
+        async () => {
+          const state = await mockState(providerReady.baseUrl);
+          return state.scenarios[scenario.token]?.completedAt;
+        },
+        30_000,
+      );
+      assert.equal(serverB, null, "server B started before terminal evidence");
+      assert.equal(
+        await loopbackPortIsUnavailable(port),
+        true,
+        "codex-web port became available before terminal evidence",
+      );
+      authoritativeTerminalEvidence = await waitForAuthoritativeTerminalTurn({
         socketPath,
         threadId,
         turnId,
       });
+      serverAStoppedAt = Date.now();
+    }
     assert(
       ["completed", "interrupted", "failed"].includes(
         authoritativeTerminalEvidence.status,
@@ -703,14 +876,41 @@ async function main() {
       "codex-web port became available during terminal evidence",
     );
 
+    serverBStartedAt = Date.now();
+    assert(serverAStoppedAt <= serverBStartedAt);
     serverB = spawnWebServer(
       port,
       projectRoot,
-      serverEnvironment,
+      serverBEnvironment,
       "codex-web-b",
     );
     trackedPids.add(serverB.pid);
     await waitForWebServer(port, serverB);
+    if (wholeInstanceRestart) {
+      const serverBAppServers = await waitFor(
+        "server B fresh default owned app-server",
+        () => {
+          assert.equal(serverB.exitCode, null, childOutput(serverB));
+          const candidates = ownedAppServerProcesses(serverB.pid);
+          return candidates.some(({ leaf }) => leaf) ? candidates : null;
+        },
+        30_000,
+      );
+      for (const { pid } of descendantsOf(serverB.pid)) trackedPids.add(pid);
+      const leaf = serverBAppServers.find((candidate) => candidate.leaf);
+      assert(leaf, "server B app-server process tree had no leaf process");
+      appServerBPid = leaf.pid;
+      assert.notEqual(appServerBPid, appServerAPid);
+      runtimeRootB = path.join(ownedRuntimeB, "codex-ipc");
+      await waitFor(
+        "server B fresh isolated runtime socket",
+        () => pathIsSocket(path.join(runtimeRootB, "ipc.sock")),
+        30_000,
+      );
+      assert.notEqual(runtimeRootB, runtimeRootA);
+      assert.equal(processExists(appServerAPid), false);
+      assert.equal(processExists(appServerBPid), true);
+    }
     const newReady = await waitFor(
       "server B bridge epoch",
       () =>
@@ -822,14 +1022,24 @@ async function main() {
       }),
       `unexpected non-loopback server request: ${blockedServerRequests.join(", ")}`,
     );
-    assert.equal(processExists(appServer.pid), true);
+    if (wholeInstanceRestart) {
+      assert.equal(processExists(appServerBPid), true);
+      assert.equal(
+        await pathIsSocket(path.join(runtimeRootB, "ipc.sock")),
+        true,
+      );
+    } else {
+      assert.equal(processExists(appServer.pid), true);
+      for (const { pid } of descendantsOf(appServer.pid)) trackedPids.add(pid);
+    }
     for (const { pid } of descendantsOf(serverB.pid)) trackedPids.add(pid);
-    for (const { pid } of descendantsOf(appServer.pid)) trackedPids.add(pid);
 
     console.log(
       JSON.stringify(
         {
           result: "passed",
+          topology: restartTopology,
+          codexVersion: codexVersion.stdout.trim(),
           port,
           threadId,
           turnId,
@@ -849,7 +1059,14 @@ async function main() {
           ).length,
           navigationCount: diagnostics.mainFrameNavigations,
           blockedExternalServerRequests: blockedServerRequests.length,
-          externalAppServerPid: appServer.pid,
+          serverAStoppedAt,
+          serverBStartedAt,
+          nonOverlappingReplacement: serverAStoppedAt <= serverBStartedAt,
+          externalAppServerPid: appServer?.pid ?? null,
+          appServerAPid,
+          appServerBPid,
+          runtimeRootA,
+          runtimeRootB,
           serverAPid: serverA.pid,
           serverBPid: serverB.pid,
         },
@@ -895,7 +1112,17 @@ async function main() {
       .stat(socketPath)
       .then(() => true)
       .catch(() => false);
+    const listenerResidue = port
+      ? !(await loopbackPortIsUnavailable(port).catch(() => false))
+      : false;
     await fs.rm(tempRoot, { recursive: true, force: true });
+    const ownedRuntimeSocketResidue = wholeInstanceRestart
+      ? await Promise.all(
+          [runtimeRootA, runtimeRootB]
+            .filter(Boolean)
+            .map((root) => pathIsSocket(path.join(root, "ipc.sock"))),
+        )
+      : [];
     const runtimeResidue = await fs
       .stat(tempRoot)
       .then(() => true)
@@ -905,6 +1132,12 @@ async function main() {
       false,
       "external app-server socket survived cleanup",
     );
+    assert.equal(
+      ownedRuntimeSocketResidue.some(Boolean),
+      false,
+      "owned instance runtime socket survived cleanup",
+    );
+    assert.equal(listenerResidue, false, "codex-web listener survived cleanup");
     assert.equal(
       runtimeResidue,
       false,
