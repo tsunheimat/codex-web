@@ -23,6 +23,7 @@
     "test": "npm run build:server && node --test test/*.test.cjs",
     "test:browser:install": "playwright install chromium",
     "test:browser": "npm run build:server && npm run build:browser && xvfb-run -a node scripts/test_browser_lifecycle.cjs",
+    "test:browser:restart": "npm run build:server && npm run build:browser && xvfb-run -a node scripts/test_browser_restart_lifecycle.cjs",
     "test:runtime": "node scripts/test_runtime_smoke.cjs",
     "test:runtime:overload": "node scripts/test_runtime_overload.cjs",
     "test:terminal": "node scripts/test_terminal_pty.cjs"

@@ -90,9 +90,32 @@ nix shell github:0xcaff/codex-web github:0xcaff/codex-web#codex_remote_proxy -c 
 '
 ```
 
-`codex app-server proxy --sock ...` is a raw stdio protocol bridge for another
-program to use; when run directly in a terminal it will wait for protocol input
-rather than opening an interactive prompt.
+The `--listen unix://...` endpoint is text WebSocket-over-Unix. The production
+`codex_remote_proxy` helper adapts that endpoint to the newline-delimited stdio
+transport expected by codex-web. The installed
+`codex app-server proxy --sock ...` command targets Codex's separate control
+socket topology and is not interchangeable with this helper.
+
+With this external topology, restarting only codex-web preserves accepted work
+in the long-lived app-server. A stale Browser tab reloads in place, keeps its
+canonical `/thread/:id` route, consumes a same-tab/session restart marker once,
+and asks the official renderer to hydrate authoritative app-server history. No
+retired bridge frames are stored or replayed, and codex-web does not resubmit
+the accepted turn.
+
+If a renderer reconnects after codex-web observed `turn/started` but missed
+`turn/completed`, codex-web reconciles the captured turn IDs with an
+authoritative `thread/read` request using `includeTurns: true`. It keeps turns
+reported as `inProgress` and turns that started after the wait began. Transient
+read or validation failures retry at a bounded cadence; after 15 seconds the
+renderer receives at most one fail-open history hydration so it cannot wait
+forever. That fallback reads history only and never starts or restarts a turn.
+
+These guarantees do not cover the default topology, where codex-web owns and
+terminates its app-server child; an app-server process restart; or the ambiguous
+window before the external app-server accepts a turn. They also do not provide
+raw bridge persistence, authentication, or HTTPS. Run authentication and TLS at
+the trusted-network boundary described below.
 
 ## security
 
@@ -149,10 +172,15 @@ Linux host with `xvfb-run` available:
 ```bash
 npm run test:browser:install
 npm run test:browser
+npm run test:browser:restart
 ```
 
 The test uses ordinary loopback HTTP, fresh browser profiles, and temporary
 runtime directories, and fails if its child processes survive teardown.
+`test:browser:restart` additionally requires an installed Codex CLI compatible
+with the external WebSocket-over-Unix app-server topology; it keeps one real
+app-server alive across two sequential codex-web processes and uses a local
+deterministic Responses provider.
 
 ## issues welcome
 
@@ -167,14 +195,14 @@ talk.
 
 ## alternatives
 
-* [davej/pocodex](https://github.com/davej/pocodex) i used this until the wheels fell off. i needed subagents
+- [davej/pocodex](https://github.com/davej/pocodex) i used this until the wheels fell off. i needed subagents
   and an inline image viewer. this didn't have them and was having a hard time
   keeping up with upstream codex updates.
-* the native codex remote feature (behind a feature flag) is great for
+- the native codex remote feature (behind a feature flag) is great for
   connecting to remote codex hosts over ssh to manage long running tasks but
   this only works if you have codex desktop on your client device. this means it
   doesn't work on mobile.
-* upcoming first party mobile app from openai. `codex-web` exists and works
+- upcoming first party mobile app from openai. `codex-web` exists and works
   today. i can't wait for the mobile app but judging by the other openai mobile
   apps, i'm a little bit skeptical about the quality of the mobile experience.
   time will tell.

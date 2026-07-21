@@ -18,6 +18,10 @@ import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
 import { cacheControlForResponse } from "./cache-policy";
 import {
+  createAuthoritativeThreadReader,
+  type DesktopInvoke,
+} from "./authoritative-thread-reader";
+import {
   invokeRendererRequest,
   rendererInvokeErrorMessage,
   type RendererInvokeMessage,
@@ -95,7 +99,11 @@ type MainToRendererMessage =
 
 type IpcMainBridgeState = {
   broadcastToRenderer?: (message: MainToRendererMessage) => void;
-  handleRendererInvoke?: (channel: string, args: unknown[]) => Promise<unknown>;
+  handleRendererInvoke?: (
+    channel: string,
+    args: unknown[],
+    responseSink?: (channel: string, args: unknown[]) => void,
+  ) => Promise<unknown>;
   handleRendererSend?: (channel: string, args: unknown[]) => void;
 };
 
@@ -217,6 +225,7 @@ function createServerCleanupAuthority({
   sessions,
   websocketServer,
   workspaceFileAuthority,
+  disposeRendererRecovery,
 }: {
   app: FastifyInstance;
   bridgeState: IpcMainBridgeState;
@@ -226,6 +235,7 @@ function createServerCleanupAuthority({
   >;
   websocketServer: WebSocketServer;
   workspaceFileAuthority: WorkspaceFileAuthority;
+  disposeRendererRecovery: () => void;
 }): ServerCleanupAuthority {
   let cleanupPromise: Promise<void> | null = null;
   let exitPromise: Promise<void> | null = null;
@@ -277,6 +287,7 @@ function createServerCleanupAuthority({
       bridgeState.broadcastToRenderer = undefined;
       bridgeState.handleRendererInvoke = undefined;
       bridgeState.handleRendererSend = undefined;
+      disposeRendererRecovery();
 
       try {
         await workspaceFileAuthority.cleanup();
@@ -325,28 +336,6 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     string,
     ReliableBridgeSession<RendererToMainMessage, MainToRendererMessage>
   >();
-  const cleanupAuthority = createServerCleanupAuthority({
-    app,
-    bridgeState,
-    sessions,
-    websocketServer,
-    workspaceFileAuthority,
-  });
-  const startupStep = async <T>(
-    operation: () => T | Promise<T>,
-  ): Promise<T> => {
-    try {
-      return await operation();
-    } catch (startupError) {
-      try {
-        await cleanupAuthority.cleanup();
-      } catch (cleanupError) {
-        console.error(errorMessage(cleanupError));
-      }
-      throw startupError;
-    }
-  };
-
   function sendRendererHistoryRecovery(
     session: ReliableBridgeSession<
       RendererToMainMessage,
@@ -388,7 +377,46 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
           sendRendererHistoryRecovery(session);
         }
       },
+      readThread: createAuthoritativeThreadReader(((
+        channel,
+        args,
+        responseSink,
+      ) => {
+        const handler = bridgeState.handleRendererInvoke as
+          | DesktopInvoke
+          | undefined;
+        if (!handler) {
+          return Promise.reject(
+            new Error(
+              `[ipc-bridge] no ipcMain.handle for authoritative thread/read`,
+            ),
+          );
+        }
+        return handler(channel, args, responseSink);
+      }) satisfies DesktopInvoke),
     });
+  const cleanupAuthority = createServerCleanupAuthority({
+    app,
+    bridgeState,
+    sessions,
+    websocketServer,
+    workspaceFileAuthority,
+    disposeRendererRecovery: () => rendererRecovery.dispose(),
+  });
+  const startupStep = async <T>(
+    operation: () => T | Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await operation();
+    } catch (startupError) {
+      try {
+        await cleanupAuthority.cleanup();
+      } catch (cleanupError) {
+        console.error(errorMessage(cleanupError));
+      }
+      throw startupError;
+    }
+  };
 
   app.addHook("onSend", async (request, reply) => {
     if (request.method === "GET" || request.method === "HEAD") {
@@ -524,6 +552,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       rendererRecovery.acceptRendererReady(
         session.connectionId,
         ready.currentThreadId,
+        ready.recoveryReason,
       );
       return;
     }

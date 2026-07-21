@@ -33,7 +33,7 @@ type IpcMainBridgeState = {
   handleRendererInvoke?: (
     channel: string,
     args: unknown[],
-    sourceUrl?: string,
+    responseSink?: (channel: string, args: unknown[]) => void,
   ) => Promise<unknown>;
   handleRendererSend?: (
     channel: string,
@@ -176,11 +176,21 @@ const rendererWebContents: StubWebContents = {
   },
 };
 
-function createIpcMainEvent(): IpcMainEvent {
-  const sender =
+function createIpcMainEvent(
+  responseSink?: (channel: string, args: unknown[]) => void,
+): IpcMainEvent {
+  const defaultSender =
     (BrowserWindow.fromWebContents(rendererWebContents)
       ?.webContents as unknown as StubWebContents | undefined) ??
     rendererWebContents;
+  const sender = responseSink
+    ? ({
+        ...defaultSender,
+        send: (channel: string, ...args: unknown[]): void => {
+          responseSink(channel, args);
+        },
+      } satisfies StubWebContents)
+    : defaultSender;
   const event: IpcMainEvent = {
     returnValue: undefined,
     processId: 1,
@@ -188,6 +198,10 @@ function createIpcMainEvent(): IpcMainEvent {
     sender,
     senderFrame: sender.mainFrame,
     reply: (channel: string, ...args: unknown[]): void => {
+      if (responseSink) {
+        responseSink(channel, args);
+        return;
+      }
       getIpcMainBridgeState().broadcastToRenderer?.({
         type: "ipc-main-event",
         channel,
@@ -218,12 +232,13 @@ function createIpcMainStub(): {
   bridgeState.handleRendererInvoke = async (
     channel: string,
     args: unknown[],
+    responseSink?: (channel: string, args: unknown[]) => void,
   ): Promise<unknown> => {
     const handler = handlers.get(channel);
     if (!handler) {
       throw new Error(`[electron-main-stub] No ipcMain.handle for ${channel}`);
     }
-    const event = createIpcMainEvent();
+    const event = createIpcMainEvent(responseSink);
     return await Promise.resolve(handler(event, ...args));
   };
 
@@ -395,8 +410,8 @@ class BrowserWindow {
         getURL: (): string => {
           log(`BrowserWindow#${this.id}.webContents.getURL`, []);
           return String(
-            (this.webContents.mainFrame as { url?: string } | undefined)
-              ?.url ?? "",
+            (this.webContents.mainFrame as { url?: string } | undefined)?.url ??
+              "",
           );
         },
         isDestroyed: (): boolean => this.destroyed,
@@ -457,10 +472,7 @@ class BrowserWindow {
 
   static getFocusedWindow(): BrowserWindow | null {
     log("BrowserWindow.getFocusedWindow", []);
-    if (
-      BrowserWindow.focusedWindow &&
-      !BrowserWindow.focusedWindow.destroyed
-    ) {
+    if (BrowserWindow.focusedWindow && !BrowserWindow.focusedWindow.destroyed) {
       return BrowserWindow.focusedWindow;
     }
     return BrowserWindow.getAllWindows()[0] ?? null;
@@ -888,14 +900,19 @@ function createSessionStub(label: string): {
     },
   };
 }
-const partitionSessions = new Map<string, ReturnType<typeof createSessionStub>>();
+const partitionSessions = new Map<
+  string,
+  ReturnType<typeof createSessionStub>
+>();
 const session = {
   defaultSession: createSessionStub("session.defaultSession"),
   fromPartition(partition: string): ReturnType<typeof createSessionStub> {
     log("session.fromPartition", [partition]);
     let partitionSession = partitionSessions.get(partition);
     if (!partitionSession) {
-      partitionSession = createSessionStub(`session.fromPartition(${partition})`);
+      partitionSession = createSessionStub(
+        `session.fromPartition(${partition})`,
+      );
       partitionSessions.set(partition, partitionSession);
     }
     return partitionSession;

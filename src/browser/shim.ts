@@ -4,6 +4,12 @@ import {
   mapMemoryPathToBrowserPath,
 } from "./routes";
 import {
+  BACKEND_RESTART_RECOVERY_REASON,
+  consumeBackendRestartRecoveryMarker,
+  storeBackendRestartRecoveryMarker,
+  type RendererRecoveryReason,
+} from "../server/restart-recovery-marker";
+import {
   downloadWorkspaceFileCopy,
   handleLocalFilePickerMessage,
   isLocalFilePickerMessage,
@@ -19,6 +25,7 @@ type RendererToMainMessage =
   | {
       type: "renderer-bridge-ready";
       currentThreadId: string | null;
+      recoveryReason: RendererRecoveryReason;
     }
   | {
       type: "ipc-renderer-invoke";
@@ -527,7 +534,18 @@ function resetBridge(reason: string): void {
   console.error(`[electron-stub] reliable IPC bridge reset: ${reason}`);
   stopSocketTimeout();
   socket?.close();
+  if (reason === "backend restarted") {
+    storeBackendRestartRecoveryMarker(browserSessionStorage());
+  }
   window.location.reload();
+}
+
+function browserSessionStorage(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
 }
 
 function nextRequestId(): string {
@@ -560,6 +578,9 @@ function addIpcListener(channel: string, listener: IpcListener): void {
     enqueueMessage({
       type: "renderer-bridge-ready",
       currentThreadId: currentThreadIdFromBrowserPath(window.location.pathname),
+      recoveryReason: consumeBackendRestartRecoveryMarker(
+        browserSessionStorage(),
+      ),
     });
   }
 }
