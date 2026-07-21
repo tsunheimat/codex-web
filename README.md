@@ -70,6 +70,14 @@ Invalid, zero, negative, fractional, or unsafe values fail startup before the
 server listens. This quota is separate from the 25 MiB per-file multipart
 limit.
 
+The disposable upload root is private to the server process and created with
+mode `0700`. Discard reopens the registered random name without following
+symlinks, verifies its recorded device, inode, and size through the pinned root,
+and releases retained quota only after the opened inode proves that its link was
+removed. Node does not expose an identity-checked `unlinkat`, so the final unlink
+assumes that another same-UID process does not mutate this private root between
+verification and removal; the implementation does not claim otherwise.
+
 ### sign in
 
 ensure the codex cli on the host machine is signed in before starting the

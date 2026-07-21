@@ -304,6 +304,13 @@ function workspaceOpenError(error: unknown, label: string): WorkspacePathError {
   return new WorkspacePathError(`${label} cannot be opened`);
 }
 
+function unsafeUploadDiscardError(): WorkspacePathError {
+  return new WorkspacePathError(
+    "Registered upload cannot be safely discarded",
+    403,
+  );
+}
+
 async function closeHandle(handle: FileHandle | null): Promise<void> {
   if (handle) {
     await handle.close();
@@ -319,6 +326,7 @@ export class WorkspaceFileAuthority {
   private readonly browseRootHandle: FileHandle;
   private readonly uploadRootHandle: FileHandle;
   private readonly uploadedFiles = new Map<string, UploadRecord>();
+  private readonly activeUploadDiscards = new Map<string, Promise<void>>();
   private readonly activeAuthorityOperations = new Set<Promise<void>>();
   private readonly activeReadStreams = new Set<Readable>();
   private readonly activeUploads = new Set<ActiveUpload>();
@@ -359,9 +367,7 @@ export class WorkspaceFileAuthority {
     try {
       browseRootHandle = await fs.open(
         browseRoot,
-        constants.O_RDONLY |
-          constants.O_DIRECTORY |
-          constants.O_NONBLOCK,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
       );
       const browseStat = await browseRootHandle.stat();
       const browseTarget = descriptorTargetPath(
@@ -380,9 +386,7 @@ export class WorkspaceFileAuthority {
       await fs.mkdir(uploadRoot, { mode: 0o700 });
       uploadRootHandle = await fs.open(
         uploadRoot,
-        constants.O_RDONLY |
-          constants.O_DIRECTORY |
-          constants.O_NONBLOCK,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
       );
       const uploadStat = await uploadRootHandle.stat();
       const uploadTarget = descriptorTargetPath(
@@ -529,9 +533,7 @@ export class WorkspaceFileAuthority {
       try {
         handle = await fs.open(
           descriptorPath(this.browseRootHandle, classified.relativePath),
-          constants.O_RDONLY |
-            constants.O_DIRECTORY |
-            constants.O_NONBLOCK,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
         );
       } catch (error) {
         throw workspaceOpenError(error, "Workspace directory");
@@ -627,9 +629,7 @@ export class WorkspaceFileAuthority {
       try {
         handle = await fs.open(
           descriptorPath(this.uploadRootHandle, storageName),
-          constants.O_WRONLY |
-            constants.O_CREAT |
-            constants.O_EXCL,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
           0o600,
         );
       } finally {
@@ -726,18 +726,93 @@ export class WorkspaceFileAuthority {
       return;
     }
 
-    this.uploadedFiles.delete(resolvedPath);
-    this.retainedBytes -= record.bytes;
+    const activeDiscard = this.activeUploadDiscards.get(resolvedPath);
+    if (activeDiscard) {
+      return activeDiscard;
+    }
+
+    const discard = this.discardRegisteredUpload(resolvedPath, record);
+    this.activeUploadDiscards.set(resolvedPath, discard);
     try {
-      await fs.rm(descriptorPath(this.uploadRootHandle, record.storageName), {
-        force: true,
-      });
-    } catch (error) {
-      if (!this.cleanedUp && !this.uploadedFiles.has(resolvedPath)) {
-        this.uploadedFiles.set(resolvedPath, record);
-        this.retainedBytes += record.bytes;
+      await discard;
+    } finally {
+      if (this.activeUploadDiscards.get(resolvedPath) === discard) {
+        this.activeUploadDiscards.delete(resolvedPath);
       }
-      throw error;
+    }
+  }
+
+  private async discardRegisteredUpload(
+    resolvedPath: string,
+    record: UploadRecord,
+  ): Promise<void> {
+    const finishOperation = this.beginAuthorityOperation();
+    let handle: FileHandle | null = null;
+    try {
+      try {
+        handle = await fs.open(
+          descriptorPath(this.uploadRootHandle, record.storageName),
+          constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+        );
+      } catch {
+        throw unsafeUploadDiscardError();
+      }
+
+      let openedStat: BigIntStats;
+      try {
+        openedStat = await this.validateOpenedTarget(
+          handle,
+          this.uploadRootHandle,
+          record.storageName,
+          "Registered upload",
+        );
+      } catch {
+        throw unsafeUploadDiscardError();
+      }
+      if (
+        !openedStat.isFile() ||
+        openedStat.dev !== record.device ||
+        openedStat.ino !== record.inode ||
+        openedStat.size !== BigInt(record.bytes)
+      ) {
+        throw unsafeUploadDiscardError();
+      }
+
+      // Node has no identity-checked unlinkat API. The upload root is created
+      // mode 0700 inside a private per-process runtime and normal service code
+      // mutates it only through this authority. Opening with O_NOFOLLOW through
+      // the pinned root rejects substitutions already present; the fstat after
+      // unlink also prevents quota release unless this opened inode lost the
+      // registered directory entry. This does not claim atomic protection from
+      // a hostile same-UID process swapping the name between fstat and unlink.
+      try {
+        await fs.unlink(
+          descriptorPath(this.uploadRootHandle, record.storageName),
+        );
+        const discardedStat = await handle.stat({ bigint: true });
+        if (
+          discardedStat.dev !== openedStat.dev ||
+          discardedStat.ino !== openedStat.ino ||
+          discardedStat.size !== openedStat.size ||
+          openedStat.nlink < 1n ||
+          discardedStat.nlink !== openedStat.nlink - 1n
+        ) {
+          throw new Error("registered upload link count did not decrease");
+        }
+      } catch {
+        throw unsafeUploadDiscardError();
+      }
+
+      if (this.uploadedFiles.get(resolvedPath) === record) {
+        this.uploadedFiles.delete(resolvedPath);
+        this.retainedBytes -= record.bytes;
+      }
+    } finally {
+      try {
+        await closeHandle(handle);
+      } finally {
+        finishOperation();
+      }
     }
   }
 
@@ -823,9 +898,11 @@ export class WorkspaceFileAuthority {
         stream.destroy(new Error("Workspace file authority is shutting down"));
       }
       for (const upload of this.activeUploads) {
-        const destroy = (upload.source as NodeJS.ReadableStream & {
-          destroy?: (error?: Error) => void;
-        }).destroy;
+        const destroy = (
+          upload.source as NodeJS.ReadableStream & {
+            destroy?: (error?: Error) => void;
+          }
+        ).destroy;
         destroy?.call(upload.source);
         this.inFlightBytes -= upload.reservedBytes;
         upload.reservedBytes = 0;
@@ -840,10 +917,7 @@ export class WorkspaceFileAuthority {
           })
           .catch(() => undefined);
       });
-      await Promise.all([
-        ...readCompletions,
-        ...uploadClosures,
-      ]);
+      await Promise.all([...readCompletions, ...uploadClosures]);
       this.activeUploads.clear();
 
       this.uploadedFiles.clear();
@@ -863,7 +937,10 @@ export class WorkspaceFileAuthority {
         }
       }
       if (errors.length > 0) {
-        throw new AggregateError(errors, "Workspace file authority cleanup failed");
+        throw new AggregateError(
+          errors,
+          "Workspace file authority cleanup failed",
+        );
       }
     })();
     return this.cleanupPromise;

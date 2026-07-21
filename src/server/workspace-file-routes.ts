@@ -50,14 +50,20 @@ export async function registerWorkspaceFileRoutes(
     const storedFiles: Awaited<
       ReturnType<WorkspaceFileAuthority["storeUpload"]>
     >[] = [];
+    let responseClosed = false;
     let responseFinished = false;
+    const rollbackStoredFiles = async (): Promise<void> => {
+      const files = storedFiles.splice(0);
+      await Promise.allSettled(
+        files.map((file) => authority.discardUpload(file.path)),
+      );
+    };
     const rollbackOnAbortedResponse = (): void => {
       if (responseFinished || reply.raw.writableFinished) {
         return;
       }
-      void Promise.allSettled(
-        storedFiles.map((file) => authority.discardUpload(file.path)),
-      );
+      responseClosed = true;
+      void rollbackStoredFiles();
     };
     reply.raw.once("close", rollbackOnAbortedResponse);
     reply.raw.once("finish", () => {
@@ -72,6 +78,10 @@ export async function registerWorkspaceFileRoutes(
           );
         }
         const stored = await authority.storeUpload(part.file, part.filename);
+        if (responseClosed) {
+          await authority.discardUpload(stored.path);
+          return;
+        }
         if (part.file.truncated) {
           await authority.discardUpload(stored.path);
           throw new WorkspacePathError("uploaded file exceeds size limit", 413);
@@ -79,12 +89,17 @@ export async function registerWorkspaceFileRoutes(
         storedFiles.push(stored);
       }
     } catch (error) {
-      await Promise.all(
-        storedFiles.map((file) => authority.discardUpload(file.path)),
-      );
+      await rollbackStoredFiles();
+      if (responseClosed) {
+        return;
+      }
       return workspaceErrorReply(error, reply);
     }
 
+    if (responseClosed) {
+      await rollbackStoredFiles();
+      return;
+    }
     if (storedFiles.length === 0) {
       return reply
         .code(400)

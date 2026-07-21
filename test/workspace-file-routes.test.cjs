@@ -16,7 +16,7 @@ const {
   WorkspaceFileAuthority,
 } = require("../src/server/workspace-files.js");
 
-async function serverFixture(t, uploadQuotaBytes) {
+async function serverFixture(t, uploadQuotaBytes, configureApp) {
   const temporaryRoot = await fsp.mkdtemp(
     path.join(os.tmpdir(), "codex-web-workspace-routes-test-"),
   );
@@ -40,6 +40,9 @@ async function serverFixture(t, uploadQuotaBytes) {
     uploadQuotaBytes,
   );
   const app = Fastify({ logger: false });
+  if (configureApp) {
+    await configureApp({ app, authority });
+  }
   await registerWorkspaceFileRoutes(app, authority);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const address = app.server.address();
@@ -277,6 +280,84 @@ test("client request abort removes the incomplete file and releases in-flight qu
       item.authority.getActiveDescriptorState().uploadOperations === 0
     );
   });
+  assert.equal(item.authority.getUploadAccounting().peakBytes, 7);
+});
+
+test("response close before a committed store returns discards the late upload", async (t) => {
+  let committedPath;
+  let markCommitted;
+  let releaseStore;
+  let markResponseClosed;
+  const committed = new Promise((resolve) => {
+    markCommitted = resolve;
+  });
+  const storeMayReturn = new Promise((resolve) => {
+    releaseStore = resolve;
+  });
+  const responseClosed = new Promise((resolve) => {
+    markResponseClosed = resolve;
+  });
+  t.after(() => releaseStore());
+
+  const item = await serverFixture(t, 64, async ({ app, authority }) => {
+    const storeUpload = authority.storeUpload.bind(authority);
+    authority.storeUpload = async (...arguments_) => {
+      const stored = await storeUpload(...arguments_);
+      committedPath = stored.path;
+      markCommitted();
+      await storeMayReturn;
+      return stored;
+    };
+    app.addHook("onRequest", (request, reply, done) => {
+      if (request.url === "/__backend/upload") {
+        reply.raw.once("close", () => markResponseClosed());
+      }
+      done();
+    });
+  });
+  const boundary = `codex-web-${randomUUID()}`;
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="late.bin"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+    ),
+    Buffer.alloc(7, 0x61),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  const url = new URL("/__backend/upload", item.baseUrl);
+  const request = http.request({
+    hostname: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: "POST",
+    headers: {
+      "content-length": body.byteLength,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+    },
+  });
+  request.on("error", () => undefined);
+  request.end(body);
+
+  await committed;
+  assert.deepEqual(item.authority.getUploadAccounting(), {
+    quotaBytes: 64,
+    retainedBytes: 7,
+    inFlightBytes: 0,
+    totalBytes: 7,
+    peakBytes: 7,
+  });
+  request.destroy();
+  await responseClosed;
+  releaseStore();
+
+  await waitFor("late committed upload rollback", async () => {
+    return (
+      item.authority.getUploadAccounting().retainedBytes === 0 &&
+      item.authority.getUploadAccounting().inFlightBytes === 0 &&
+      item.authority.getUploadAccounting().totalBytes === 0 &&
+      (await fsp.readdir(item.authority.uploadRoot)).length === 0
+    );
+  });
+  assert.equal(fs.existsSync(committedPath), false);
   assert.equal(item.authority.getUploadAccounting().peakBytes, 7);
 });
 

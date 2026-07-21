@@ -93,7 +93,10 @@ test("parses the exact default and only positive decimal safe upload quotas", ()
   assert.equal(parseUploadQuotaBytes(undefined), 512 * 1024 * 1024);
   assert.equal(parseUploadQuotaBytes("1"), 1);
   assert.equal(parseUploadQuotaBytes("00042"), 42);
-  assert.equal(parseUploadQuotaBytes(String(Number.MAX_SAFE_INTEGER)), Number.MAX_SAFE_INTEGER);
+  assert.equal(
+    parseUploadQuotaBytes(String(Number.MAX_SAFE_INTEGER)),
+    Number.MAX_SAFE_INTEGER,
+  );
   for (const invalid of [
     "",
     "0",
@@ -175,7 +178,11 @@ test("picker consumes the pinned directory authority and preserves bounded order
   // This helper is deliberately retained only for strings forwarded to the
   // separate app-server process; it must keep its Phase 3 behavior.
   assert.throws(
-    () => resolveBoundedDirectory(path.join(item.browseRoot, "escape-link"), item.browseRoot),
+    () =>
+      resolveBoundedDirectory(
+        path.join(item.browseRoot, "escape-link"),
+        item.browseRoot,
+      ),
     /must not contain symlinks/,
   );
 });
@@ -185,10 +192,19 @@ test("browse and picker operations stay rooted in the lifetime-pinned inode", as
   const movedRoot = path.join(item.temporaryRoot, "original-browse");
   await fsp.rename(item.browseRoot, movedRoot);
   await fsp.mkdir(item.browseRoot);
-  await fsp.writeFile(path.join(item.browseRoot, "replacement.txt"), "replacement");
+  await fsp.writeFile(
+    path.join(item.browseRoot, "replacement.txt"),
+    "replacement",
+  );
 
-  const entries = await item.authority.getWorkspaceDirectoryEntries(null, false);
-  assert.equal(entries.entries.some((entry) => entry.name === "a.txt"), true);
+  const entries = await item.authority.getWorkspaceDirectoryEntries(
+    null,
+    false,
+  );
+  assert.equal(
+    entries.entries.some((entry) => entry.name === "a.txt"),
+    true,
+  );
   assert.equal(
     entries.entries.some((entry) => entry.name === "replacement.txt"),
     false,
@@ -205,11 +221,17 @@ test("opened workspace descriptor is consumed after deterministic pathname repla
   const requestedPath = path.join(item.browseRoot, "a.txt");
   const opened = await item.authority.openAllowedFile(requestedPath);
 
-  await fsp.rename(requestedPath, path.join(item.browseRoot, "authorized-inode.txt"));
+  await fsp.rename(
+    requestedPath,
+    path.join(item.browseRoot, "authorized-inode.txt"),
+  );
   await fsp.writeFile(requestedPath, "replacement outside decision");
 
   assert.equal((await readStream(opened.stream)).toString(), "workspace bytes");
-  assert.equal(await fsp.readFile(requestedPath, "utf8"), "replacement outside decision");
+  assert.equal(
+    await fsp.readFile(requestedPath, "utf8"),
+    "replacement outside decision",
+  );
   assert.deepEqual(item.authority.getActiveDescriptorState(), {
     rootDescriptors: 2,
     readDescriptors: 0,
@@ -234,7 +256,7 @@ test("actual-open validation rejects intermediate and final symlink escapes", as
   assert.equal(item.authority.getActiveDescriptorState().readDescriptors, 0);
 });
 
-test("uploads use random names, registered inode identity, and exact retained accounting", async (t) => {
+test("substituted upload discard fails closed and retains registration until authority cleanup", async (t) => {
   const item = await authorityFixture(t, 64);
   const upload = await item.authority.storeUpload(
     Readable.from([Buffer.from("uploaded bytes")]),
@@ -255,7 +277,10 @@ test("uploads use random names, registered inode identity, and exact retained ac
   const openedUpload = await item.authority.openAllowedFile(upload.path);
   assert.equal(openedUpload.downloadName, "unsafe__name.txt");
   assert.equal(openedUpload.source, "upload");
-  assert.equal((await readStream(openedUpload.stream)).toString(), "uploaded bytes");
+  assert.equal(
+    (await readStream(openedUpload.stream)).toString(),
+    "uploaded bytes",
+  );
 
   const originalInode = `${upload.path}.original`;
   await fsp.rename(upload.path, originalInode);
@@ -265,17 +290,67 @@ test("uploads use random names, registered inode identity, and exact retained ac
     /identity no longer matches its registration/,
   );
 
-  await item.authority.discardUpload(upload.path);
-  assert.equal(fs.existsSync(upload.path), false);
+  await assert.rejects(
+    item.authority.discardUpload(upload.path),
+    (error) =>
+      error instanceof WorkspacePathError &&
+      error.statusCode === 403 &&
+      error.message === "Registered upload cannot be safely discarded",
+  );
+  assert.equal(await fsp.readFile(upload.path, "utf8"), "different inode");
+  assert.equal(await fsp.readFile(originalInode, "utf8"), "uploaded bytes");
   assert.deepEqual(item.authority.getUploadAccounting(), {
     quotaBytes: 64,
-    retainedBytes: 0,
+    retainedBytes: 14,
     inFlightBytes: 0,
-    totalBytes: 0,
+    totalBytes: 14,
     peakBytes: 14,
   });
-  await item.authority.discardUpload(upload.path);
+
+  const runtimeRoot = item.authority.runtimeRoot;
+  await item.authority.cleanup();
+  assert.equal(fs.existsSync(upload.path), false);
+  assert.equal(fs.existsSync(originalInode), false);
+  assert.equal(fs.existsSync(runtimeRoot), false);
   assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
+});
+
+test("missing and symlinked registered discard paths fail with the same bounded error", async (t) => {
+  const item = await authorityFixture(t, 64);
+  const missing = await item.authority.storeUpload(
+    Readable.from([Buffer.from("missing")]),
+    "missing.bin",
+  );
+  const symlinked = await item.authority.storeUpload(
+    Readable.from([Buffer.from("symlink")]),
+    "symlink.bin",
+  );
+  const missingOriginal = `${missing.path}.original`;
+  const symlinkOriginal = `${symlinked.path}.original`;
+  await fsp.rename(missing.path, missingOriginal);
+  await fsp.rename(symlinked.path, symlinkOriginal);
+  await fsp.symlink(symlinkOriginal, symlinked.path);
+
+  for (const registeredPath of [missing.path, symlinked.path]) {
+    await assert.rejects(
+      item.authority.discardUpload(registeredPath),
+      (error) =>
+        error instanceof WorkspacePathError &&
+        error.statusCode === 403 &&
+        error.message === "Registered upload cannot be safely discarded",
+    );
+  }
+  assert.equal(fs.existsSync(missing.path), false);
+  assert.equal((await fsp.lstat(symlinked.path)).isSymbolicLink(), true);
+  assert.equal(await fsp.readFile(missingOriginal, "utf8"), "missing");
+  assert.equal(await fsp.readFile(symlinkOriginal, "utf8"), "symlink");
+  assert.deepEqual(item.authority.getUploadAccounting(), {
+    quotaBytes: 64,
+    retainedBytes: 14,
+    inFlightBytes: 0,
+    totalBytes: 14,
+    peakBytes: 14,
+  });
 });
 
 test("aggregate concurrent reservations never oversubscribe process quota", async (t) => {
@@ -291,7 +366,10 @@ test("aggregate concurrent reservations never oversubscribe process quota", asyn
       await firstMayFinish;
     })(),
   );
-  const firstUploadPromise = item.authority.storeUpload(firstSource, "first.bin");
+  const firstUploadPromise = item.authority.storeUpload(
+    firstSource,
+    "first.bin",
+  );
   await waitFor(
     "first direct upload reservation",
     () => item.authority.getUploadAccounting().inFlightBytes === 6,
@@ -317,9 +395,14 @@ test("aggregate concurrent reservations never oversubscribe process quota", asyn
   assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), [
     path.basename(firstUpload.path),
   ]);
-  await item.authority.discardUpload(firstUpload.path);
+  await Promise.all([
+    item.authority.discardUpload(firstUpload.path),
+    item.authority.discardUpload(firstUpload.path),
+  ]);
   assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
   assert.deepEqual(await fsp.readdir(item.authority.uploadRoot), []);
+  await item.authority.discardUpload(firstUpload.path);
+  assert.equal(item.authority.getUploadAccounting().totalBytes, 0);
 });
 
 test("stream failure rolls back every byte and incomplete upload file exactly once", async (t) => {
@@ -331,7 +414,10 @@ test("stream failure rolls back every byte and incomplete upload file exactly on
       throw failure;
     })(),
   );
-  await assert.rejects(item.authority.storeUpload(source, "failed.bin"), failure);
+  await assert.rejects(
+    item.authority.storeUpload(source, "failed.bin"),
+    failure,
+  );
   assert.deepEqual(item.authority.getUploadAccounting(), {
     quotaBytes: 64,
     retainedBytes: 0,
@@ -359,7 +445,9 @@ test("rejections and destroyed reads close request descriptors and cleanup close
   );
   assert.equal(await fdCount(), baseline + 2);
 
-  const opened = await authority.openAllowedFile(path.join(item.browseRoot, "a.txt"));
+  const opened = await authority.openAllowedFile(
+    path.join(item.browseRoot, "a.txt"),
+  );
   const closed = once(opened.stream, "close");
   opened.stream.destroy();
   await closed;
