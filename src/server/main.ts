@@ -335,6 +335,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     process.env.CODEX_WEBUI_BROWSE_ROOT?.trim() || os.homedir();
   const workspaceFileAuthority =
     await WorkspaceFileAuthority.create(configuredBrowseRoot);
+  const ownsAppServerRuntime = !process.env.CODEX_UNIX_SOCKET?.trim();
   const bridgeState = getIpcMainBridgeState();
   const app = Fastify({ logger: false });
   const websocketServer = new WebSocketServer({ noServer: true });
@@ -643,6 +644,15 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   await startupStep(async () => {
     ensureElectronLikeProcessContext();
     installModuleAliasHook();
+
+    if (ownsAppServerRuntime) {
+      // The default Desktop app-server creates TMPDIR/codex-ipc/ipc.sock but
+      // Codex does not unlink that pathname when it exits. Keep it inside the
+      // exact per-process root codex-web already owns so normal server cleanup
+      // can remove it without touching a caller's shared TMPDIR. The external
+      // CODEX_UNIX_SOCKET topology retains its existing runtime boundary.
+      process.env.TMPDIR = workspaceFileAuthority.runtimeRoot;
+    }
 
     const packageJson = JSON.parse(
       await fs.readFile(

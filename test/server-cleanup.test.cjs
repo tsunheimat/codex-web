@@ -140,6 +140,13 @@ async function runtimeRoots(temporaryDirectory) {
   return entries.filter((entry) => entry.startsWith("codex-web-runtime-"));
 }
 
+async function pathIsSocket(socketPath) {
+  return await fsp
+    .stat(socketPath)
+    .then((stat) => stat.isSocket())
+    .catch(() => false);
+}
+
 async function assertPortClosed(port) {
   await new Promise((resolve, reject) => {
     const socket = net.connect({ host: "127.0.0.1", port });
@@ -181,7 +188,10 @@ async function verifyAndRemoveFixtureRoot(
   if (verificationFailed) throw verificationError;
 }
 
-async function createIsolatedRun(t, { codexCliPath, port }) {
+async function createIsolatedRun(
+  t,
+  { codexCliPath, environment = {}, port },
+) {
   const root = await fsp.mkdtemp(
     path.join(os.tmpdir(), "codex-web-server-cleanup-test-"),
   );
@@ -210,6 +220,7 @@ async function createIsolatedRun(t, { codexCliPath, port }) {
           CODEX_WEBUI_BROWSE_ROOT: browseRoot,
           TMPDIR: temporaryDirectory,
           [runMarkerName]: runId,
+          ...environment,
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -351,6 +362,19 @@ test("SIGTERM performs normal cleanup and closes run-owned app-server child", as
     const pids = await markedProcessIds(run.runId);
     return pids.some((pid) => pid !== run.child.pid);
   });
+  const ownedRuntimeRoot = await waitFor(
+    "run-owned app-server IPC socket",
+    async () => {
+      for (const entry of await runtimeRoots(run.temporaryDirectory)) {
+        const runtimeRoot = path.join(run.temporaryDirectory, entry);
+        if (await pathIsSocket(path.join(runtimeRoot, "codex-ipc/ipc.sock"))) {
+          return runtimeRoot;
+        }
+      }
+      return false;
+    },
+  );
+  const ownedSocketPath = path.join(ownedRuntimeRoot, "codex-ipc/ipc.sock");
   run.child.kill("SIGTERM");
 
   const result = await waitForExit(run);
@@ -359,5 +383,46 @@ test("SIGTERM performs normal cleanup and closes run-owned app-server child", as
     const pids = await markedProcessIds(run.runId);
     return pids.length === 0;
   });
+  assert.equal(
+    await pathIsSocket(ownedSocketPath),
+    false,
+    "run-owned app-server socket survived server cleanup",
+  );
+  await assertRunClean(run);
+});
+
+test("external app-server topology does not delete shared runtime state", async (t) => {
+  const port = await unusedLoopbackPort();
+  const externalSocketPath = path.join(
+    os.tmpdir(),
+    `external-app-server-${randomUUID()}.sock`,
+  );
+  const run = await createIsolatedRun(t, {
+    codexCliPath: hangingCodexCli,
+    environment: { CODEX_UNIX_SOCKET: externalSocketPath },
+    port,
+  });
+  const sharedSocketPath = path.join(
+    run.temporaryDirectory,
+    "codex-ipc/ipc.sock",
+  );
+
+  await waitFor("shared app-server IPC socket", () =>
+    pathIsSocket(sharedSocketPath),
+  );
+  run.child.kill("SIGTERM");
+  const result = await waitForExit(run);
+  assert.equal(result.code, 0, childOutput(run));
+  await waitFor("external-topology process exit", async () => {
+    const pids = await markedProcessIds(run.runId);
+    return pids.length === 0;
+  });
+  assert.equal(
+    await pathIsSocket(sharedSocketPath),
+    true,
+    "codex-web deleted shared external-topology runtime state",
+  );
+
+  await fsp.rm(path.dirname(sharedSocketPath), { recursive: true, force: true });
   await assertRunClean(run);
 });

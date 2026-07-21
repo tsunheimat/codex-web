@@ -151,16 +151,32 @@ async function stopChild(child) {
     return { forced: false };
   }
   child.kill("SIGTERM");
-  const exited = await Promise.race([
-    new Promise((resolve) => child.once("exit", () => resolve(true))),
-    wait(3_000).then(() => false),
-  ]);
+  const exited = await waitForChildExit(child, 3_000);
   if (!exited) {
     child.kill("SIGKILL");
-    await new Promise((resolve) => child.once("exit", resolve));
+    assert.equal(
+      await waitForChildExit(child, 3_000),
+      true,
+      `child ${child.pid} did not exit after SIGKILL`,
+    );
     return { forced: true };
   }
   return { forced: false };
+}
+
+async function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    child.once("exit", onExit);
+  });
 }
 
 function ownedAppServerProcesses(parentPid) {
@@ -187,6 +203,29 @@ async function pathIsSocket(socketPath) {
     .stat(socketPath)
     .then((stat) => stat.isSocket())
     .catch(() => false);
+}
+
+async function unixSocketIsUnavailable(socketPath) {
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: socketPath });
+    socket.setTimeout(1_000);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", (error) => {
+      socket.destroy();
+      if (["ECONNREFUSED", "ENOENT"].includes(error?.code)) {
+        resolve(true);
+        return;
+      }
+      reject(error);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      reject(new Error(`timed out checking Unix socket ${socketPath}`));
+    });
+  });
 }
 
 async function unusedLoopbackPort() {
@@ -227,7 +266,9 @@ async function loopbackPortIsUnavailable(port) {
 }
 
 async function mockState(baseUrl) {
-  const response = await fetch(`${baseUrl}/__control/state`);
+  const response = await fetch(`${baseUrl}/__control/state`, {
+    signal: AbortSignal.timeout(2_000),
+  });
   assert.equal(response.status, 200);
   return await response.json();
 }
@@ -241,7 +282,9 @@ async function waitForWebServer(port, expectedProcess) {
         null,
         childOutput(expectedProcess),
       );
-      const response = await fetch(`http://127.0.0.1:${port}/`);
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
+        signal: AbortSignal.timeout(2_000),
+      });
       await response.body?.cancel();
       return response.status === 200;
     },
@@ -691,10 +734,19 @@ async function main() {
       const leaf = serverAAppServers.find((candidate) => candidate.leaf);
       assert(leaf, "server A app-server process tree had no leaf process");
       appServerAPid = leaf.pid;
-      runtimeRootA = path.join(ownedRuntimeA, "codex-ipc");
-      await waitFor(
+      runtimeRootA = await waitFor(
         "server A isolated runtime socket",
-        () => pathIsSocket(path.join(runtimeRootA, "ipc.sock")),
+        async () => {
+          for (const entry of await runtimeRoots(ownedRuntimeA)) {
+            const runtimeRoot = path.join(ownedRuntimeA, entry);
+            if (
+              await pathIsSocket(path.join(runtimeRoot, "codex-ipc/ipc.sock"))
+            ) {
+              return runtimeRoot;
+            }
+          }
+          return false;
+        },
         30_000,
       );
     }
@@ -813,17 +865,16 @@ async function main() {
         () => loopbackPortIsUnavailable(port),
         10_000,
       );
-      await fs.rm(ownedRuntimeA, { recursive: true, force: true });
       assert.equal(
         await fs
-          .stat(ownedRuntimeA)
+          .stat(runtimeRootA)
           .then(() => true)
           .catch(() => false),
         false,
-        "server A disposable Pod runtime survived teardown",
+        "server A run-owned app-server runtime survived cleanup",
       );
       assert.equal(
-        await pathIsSocket(path.join(runtimeRootA, "ipc.sock")),
+        await pathIsSocket(path.join(runtimeRootA, "codex-ipc/ipc.sock")),
         false,
       );
       assert.equal(serverB, null, "server B overlapped server A teardown");
@@ -901,10 +952,19 @@ async function main() {
       assert(leaf, "server B app-server process tree had no leaf process");
       appServerBPid = leaf.pid;
       assert.notEqual(appServerBPid, appServerAPid);
-      runtimeRootB = path.join(ownedRuntimeB, "codex-ipc");
-      await waitFor(
+      runtimeRootB = await waitFor(
         "server B fresh isolated runtime socket",
-        () => pathIsSocket(path.join(runtimeRootB, "ipc.sock")),
+        async () => {
+          for (const entry of await runtimeRoots(ownedRuntimeB)) {
+            const runtimeRoot = path.join(ownedRuntimeB, entry);
+            if (
+              await pathIsSocket(path.join(runtimeRoot, "codex-ipc/ipc.sock"))
+            ) {
+              return runtimeRoot;
+            }
+          }
+          return false;
+        },
         30_000,
       );
       assert.notEqual(runtimeRootB, runtimeRootA);
@@ -1025,7 +1085,7 @@ async function main() {
     if (wholeInstanceRestart) {
       assert.equal(processExists(appServerBPid), true);
       assert.equal(
-        await pathIsSocket(path.join(runtimeRootB, "ipc.sock")),
+        await pathIsSocket(path.join(runtimeRootB, "codex-ipc/ipc.sock")),
         true,
       );
     } else {
@@ -1108,46 +1168,104 @@ async function main() {
       () => null,
       (error) => error,
     );
-    const socketResidue = await fs
-      .stat(socketPath)
-      .then(() => true)
-      .catch(() => false);
-    const listenerResidue = port
-      ? !(await loopbackPortIsUnavailable(port).catch(() => false))
-      : false;
-    await fs.rm(tempRoot, { recursive: true, force: true });
-    const ownedRuntimeSocketResidue = wholeInstanceRestart
-      ? await Promise.all(
-          [runtimeRootA, runtimeRootB]
-            .filter(Boolean)
-            .map((root) => pathIsSocket(path.join(root, "ipc.sock"))),
-        )
-      : [];
+    let teardownVerificationError = cleanupError;
+    try {
+      const listenerResidue = port
+        ? !(await loopbackPortIsUnavailable(port).catch(() => false))
+        : false;
+      if (!wholeInstanceRestart) {
+        assert.equal(
+          await unixSocketIsUnavailable(socketPath),
+          true,
+          "external app-server listener survived cleanup",
+        );
+        // Codex leaves its Unix socket pathname behind. This harness created
+        // the exact enclosing fixture root, so it may remove that stale path
+        // after proving the external process and listener are gone.
+        await fs.rm(socketPath, { force: true });
+      }
+      const socketResidue = await fs
+        .stat(socketPath)
+        .then(() => true)
+        .catch(() => false);
+      const ownedRuntimeSocketResidue = wholeInstanceRestart
+        ? await Promise.all(
+            [runtimeRootA, runtimeRootB]
+              .filter(Boolean)
+              .map((root) =>
+                pathIsSocket(path.join(root, "codex-ipc/ipc.sock")),
+              ),
+          )
+        : [];
+      const ownedRuntimeRootResidue = wholeInstanceRestart
+        ? await Promise.all(
+            [runtimeRootA, runtimeRootB].filter(Boolean).map((root) =>
+              fs
+                .stat(root)
+                .then(() => true)
+                .catch(() => false),
+            ),
+          )
+        : [];
+      assert.equal(
+        socketResidue,
+        false,
+        "external app-server socket survived cleanup",
+      );
+      assert.equal(
+        ownedRuntimeSocketResidue.some(Boolean),
+        false,
+        "owned instance runtime socket survived cleanup",
+      );
+      assert.equal(
+        ownedRuntimeRootResidue.some(Boolean),
+        false,
+        "owned instance runtime root survived cleanup",
+      );
+      assert.equal(
+        listenerResidue,
+        false,
+        "codex-web listener survived cleanup",
+      );
+    } catch (error) {
+      teardownVerificationError = teardownVerificationError
+        ? new AggregateError(
+            [teardownVerificationError, error],
+            "restart lifecycle teardown checks failed",
+          )
+        : error;
+    }
+
+    let fixtureRemovalError = null;
+    try {
+      await fs.rm(tempRoot, { recursive: true, force: true });
+    } catch (error) {
+      fixtureRemovalError = error;
+    }
     const runtimeResidue = await fs
       .stat(tempRoot)
       .then(() => true)
       .catch(() => false);
-    assert.equal(
-      socketResidue,
-      false,
-      "external app-server socket survived cleanup",
-    );
-    assert.equal(
-      ownedRuntimeSocketResidue.some(Boolean),
-      false,
-      "owned instance runtime socket survived cleanup",
-    );
-    assert.equal(listenerResidue, false, "codex-web listener survived cleanup");
-    assert.equal(
-      runtimeResidue,
-      false,
-      "restart lifecycle runtime survived cleanup",
-    );
-    if (cleanupError) throw cleanupError;
+    if (runtimeResidue && !fixtureRemovalError) {
+      fixtureRemovalError = new Error(
+        "restart lifecycle runtime survived cleanup",
+      );
+    }
+    if (teardownVerificationError && fixtureRemovalError) {
+      throw new AggregateError(
+        [teardownVerificationError, fixtureRemovalError],
+        "restart lifecycle verification and fixture removal failed",
+      );
+    }
+    if (teardownVerificationError) throw teardownVerificationError;
+    if (fixtureRemovalError) throw fixtureRemovalError;
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().then(
+  () => process.exit(0),
+  (error) => {
+    console.error(error);
+    process.exit(1);
+  },
+);
