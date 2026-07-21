@@ -188,10 +188,7 @@ async function verifyAndRemoveFixtureRoot(
   if (verificationFailed) throw verificationError;
 }
 
-async function createIsolatedRun(
-  t,
-  { codexCliPath, environment = {}, port },
-) {
+async function createIsolatedRun(t, { codexCliPath, environment = {}, port }) {
   const root = await fsp.mkdtemp(
     path.join(os.tmpdir(), "codex-web-server-cleanup-test-"),
   );
@@ -273,7 +270,9 @@ test("failed teardown verification still removes its exact fixture root", async 
     ),
   );
   await fsp.writeFile(path.join(root, "verification-sentinel"), "owned");
-  const verificationError = new Error("deliberate teardown verification failure");
+  const verificationError = new Error(
+    "deliberate teardown verification failure",
+  );
 
   await assert.rejects(
     verifyAndRemoveFixtureRoot(root, async () => {
@@ -423,6 +422,9 @@ test("external app-server topology does not delete shared runtime state", async 
     "codex-web deleted shared external-topology runtime state",
   );
 
-  await fsp.rm(path.dirname(sharedSocketPath), { recursive: true, force: true });
+  await fsp.rm(path.dirname(sharedSocketPath), {
+    recursive: true,
+    force: true,
+  });
   await assertRunClean(run);
 });
