@@ -7,6 +7,9 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { chromium } = require("playwright");
+const {
+  waitForAuthoritativeTerminalTurn,
+} = require("../test/fixtures/app-server-evidence-client.cjs");
 
 const repositoryRoot = path.resolve(__dirname, "..");
 const scenario = {
@@ -154,6 +157,29 @@ async function unusedLoopbackPort() {
   return address.port;
 }
 
+async function loopbackPortIsUnavailable(port) {
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    socket.setTimeout(1_000);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", (error) => {
+      socket.destroy();
+      if (error?.code === "ECONNREFUSED") {
+        resolve(true);
+        return;
+      }
+      reject(error);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      reject(new Error(`timed out checking codex-web port ${port}`));
+    });
+  });
+}
+
 async function mockState(baseUrl) {
   const response = await fetch(`${baseUrl}/__control/state`);
   assert.equal(response.status, 200);
@@ -243,6 +269,9 @@ function compactDataFrame(payload) {
       method,
       requestId: first?.request?.id,
       requestThreadId: first?.request?.params?.threadId,
+      notificationThreadId: first?.params?.threadId,
+      notificationTurnId: first?.params?.turn?.id,
+      notificationTurnStatus: first?.params?.turn?.status,
       responseThreadId: first?.message?.result?.thread?.id,
       responseTurnCount: first?.message?.result?.thread?.turns?.length,
     };
@@ -598,6 +627,25 @@ async function main() {
 
     const canonicalUrl = page.url();
     const threadId = threadIdFromUrl(canonicalUrl);
+    const targetTurnStarted = await waitFor(
+      "authoritative server A turn/started notification",
+      () =>
+        diagnostics.receivedData.find(
+          ({
+            argumentType,
+            method,
+            notificationThreadId,
+            notificationTurnId,
+          }) =>
+            argumentType === "mcp-notification" &&
+            method === "turn/started" &&
+            notificationThreadId === threadId &&
+            typeof notificationTurnId === "string" &&
+            notificationTurnId.length > 0,
+        ),
+      30_000,
+    );
+    const turnId = targetTurnStarted.notificationTurnId;
     const oldReady = await waitFor(
       "server A bridge epoch",
       () =>
@@ -617,12 +665,42 @@ async function main() {
       "external app-server did not survive server A",
     );
     await waitFor(
+      "codex-web port to be unavailable before authoritative evidence",
+      () => loopbackPortIsUnavailable(port),
+      10_000,
+    );
+    await waitFor(
       "provider completion while codex-web is unavailable",
       async () => {
         const state = await mockState(providerReady.baseUrl);
         return state.scenarios[scenario.token]?.completedAt;
       },
       30_000,
+    );
+
+    assert.equal(serverB, null, "server B started before terminal evidence");
+    assert.equal(
+      await loopbackPortIsUnavailable(port),
+      true,
+      "codex-web port became available before terminal evidence",
+    );
+    const authoritativeTerminalEvidence =
+      await waitForAuthoritativeTerminalTurn({
+        socketPath,
+        threadId,
+        turnId,
+      });
+    assert(
+      ["completed", "interrupted", "failed"].includes(
+        authoritativeTerminalEvidence.status,
+      ),
+      `target turn was not terminal: ${JSON.stringify(authoritativeTerminalEvidence)}`,
+    );
+    assert.equal(serverB, null, "server B started during terminal evidence");
+    assert.equal(
+      await loopbackPortIsUnavailable(port),
+      true,
+      "codex-web port became available during terminal evidence",
     );
 
     serverB = spawnWebServer(
@@ -754,6 +832,8 @@ async function main() {
           result: "passed",
           port,
           threadId,
+          turnId,
+          authoritativeTerminalEvidence,
           oldServerEpoch: oldReady.serverEpoch,
           newServerEpoch: newReady.serverEpoch,
           sameTab: page === originalPage,
