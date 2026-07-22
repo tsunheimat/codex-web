@@ -1,0 +1,28 @@
+# Optional for authenticated GHCR pulls: docker login ghcr.io
+# Pin immutable deploys with CODEX_WEB_IMAGE=ghcr.io/tsunheimat/codex-web:sha-...
+# or CODEX_WEB_IMAGE=ghcr.io/tsunheimat/codex-web@sha256:<digest>.
+services:
+  codex-web:
+    image: ${CODEX_WEB_IMAGE:-ghcr.io/tsunheimat/codex-web:latest}
+    pull_policy: always
+    restart: unless-stopped
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # Keep the host bind on 127.0.0.1 by default; use 0.0.0.0 only behind a trusted reverse proxy.
+      - "${CODEX_WEB_BIND_ADDRESS:-127.0.0.1}:${CODEX_WEB_PORT:-8214}:8214"
+    environment:
+      HOME: /home/codex-web
+      CODEX_HOME: /home/codex-web/.codex
+      CODEX_WEBUI_BROWSE_ROOT: /workspace
+    volumes:
+      - codex-web-codex-home:/home/codex-web/.codex
+      # The host workspace must be writable by the container user UID/GID 10001.
+      - type: bind
+        source: "${CODEX_WEB_WORKSPACE_DIR:-./workspace}"
+        target: /workspace
+        read_only: false
+
+volumes:
+  codex-web-codex-home:

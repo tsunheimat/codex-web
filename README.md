@@ -40,6 +40,36 @@ nix run github:0xcaff/codex-web
 
 then open <http://127.0.0.1:8214> in a browser.
 
+### docker compose
+
+The repository includes a production Compose file that pulls
+`ghcr.io/tsunheimat/codex-web:latest`, publishes the UI on loopback, persists
+Codex state in a named volume, and bind-mounts `./workspace` at `/workspace`.
+GHCR pulls normally do not need credentials, but run `docker login ghcr.io`
+first if your environment requires authenticated access.
+
+```bash
+mkdir -p workspace
+sudo chown -R 10001:10001 workspace
+docker compose up -d
+```
+
+Then open <http://127.0.0.1:8214>. Set `CODEX_WEB_IMAGE` to an immutable
+`sha-...` tag or `@sha256:...` digest before `docker compose up -d` when you
+need a pinned deploy. Set `CODEX_WEB_PORT` or `CODEX_WEB_WORKSPACE_DIR` in a
+local `.env` as needed. Use `CODEX_WEB_BIND_ADDRESS=0.0.0.0` only behind a
+trusted reverse proxy; anyone who can reach codex-web can operate Codex as the
+container user.
+
+The container runs as UID/GID `10001`, so the host workspace bind mount must be
+writable by that identity. Codex credentials and config are stored in the
+`codex-web-codex-home` volume, and no credentials are embedded in Compose or
+`.env.example`. Sign in once from the container if needed:
+
+```bash
+docker compose run --rm codex-web codex login --device-auth
+```
+
 ### workspace file boundary
 
 The project picker, workspace file previews/downloads, and workspace-related
