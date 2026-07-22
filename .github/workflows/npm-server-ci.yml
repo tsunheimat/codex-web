@@ -1,0 +1,53 @@
+name: npm server ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild better-sqlite3 node-pty --foreground-scripts
+
+      - name: Build server
+        run: npm run build:server
+
+      - name: Run focused non-browser tests
+        run: |
+          node --test \
+            test/app-server-evidence-client.test.cjs \
+            test/authoritative-thread-reader.test.cjs \
+            test/cache-policy.test.cjs \
+            test/codex-web-evidence-client.test.cjs \
+            test/electron-app-lifecycle.test.cjs \
+            test/ipc-renderer-invoke.test.cjs \
+            test/path-sanitizer.test.cjs \
+            test/reliable-bridge.test.cjs \
+            test/renderer-recovery.test.cjs \
+            test/restart-recovery-marker.test.cjs \
+            test/workspace-file-routes.test.cjs \
+            test/workspace-files.test.cjs

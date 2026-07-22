@@ -1,0 +1,153 @@
+name: container image
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "**"
+
+permissions:
+  contents: read
+
+jobs:
+  pr-build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Set image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Build image without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          pull: true
+          build-args: |
+            CODEX_VERSION=0.145.0
+          tags: ${{ steps.image.outputs.name }}:pr-${{ github.event.pull_request.number }}
+
+  publish:
+    if: >-
+      github.event_name == 'push' &&
+      github.event.deleted != true &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Set image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve publish tags
+        id: publish-tags
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+
+          sha_tag="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          mutable_tags=()
+
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            mutable_tags+=("${IMAGE_NAME}:latest")
+          fi
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            if [[ "${GITHUB_REF_NAME}" =~ ^v?[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              mutable_tags+=("${IMAGE_NAME}:${GITHUB_REF_NAME}")
+            else
+              echo "::warning::Tag ${GITHUB_REF_NAME} is not a Docker-valid semver ref; skipping the ref tag."
+            fi
+          fi
+
+          build_tags=()
+          retag_tags=()
+          if docker buildx imagetools inspect "${sha_tag}" >/dev/null 2>&1; then
+            echo "::notice::Immutable tag ${sha_tag} already exists; not pushing it again."
+            retag_tags=("${mutable_tags[@]}")
+          else
+            build_tags+=("${sha_tag}")
+            build_tags+=("${mutable_tags[@]}")
+          fi
+
+          if ((${#build_tags[@]})); then
+            echo "has_build_tags=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_build_tags=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if ((${#retag_tags[@]})); then
+            echo "has_retag_tags=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_retag_tags=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "build_tags<<EOF"
+            printf '%s\n' "${build_tags[@]}"
+            echo "EOF"
+            echo "retag_tags<<EOF"
+            printf '%s\n' "${retag_tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish image
+        if: steps.publish-tags.outputs.has_build_tags == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            CODEX_VERSION=0.145.0
+          tags: ${{ steps.publish-tags.outputs.build_tags }}
+
+      - name: Point mutable tags at existing SHA image
+        if: steps.publish-tags.outputs.has_retag_tags == 'true'
+        env:
+          SOURCE_TAG: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          RETAG_TAGS: ${{ steps.publish-tags.outputs.retag_tags }}
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r target_tag; do
+            [[ -n "${target_tag}" ]] || continue
+            docker buildx imagetools create --tag "${target_tag}" "${SOURCE_TAG}"
+          done <<< "${RETAG_TAGS}"
