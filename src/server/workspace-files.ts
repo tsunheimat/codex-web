@@ -324,6 +324,37 @@ type OpenedWorkspacePath = {
   stat: BigIntStats;
 };
 
+const PINNED_ROOT_OPEN_FLAGS =
+  constants.O_RDONLY |
+  constants.O_DIRECTORY |
+  constants.O_NONBLOCK |
+  constants.O_NOFOLLOW;
+
+async function captureDirectoryIdentity(
+  directoryPath: string,
+  changedMessage: string,
+): Promise<BigIntStats> {
+  const stat = await fs.stat(directoryPath, { bigint: true });
+  if (!stat.isDirectory()) {
+    throw new Error(changedMessage);
+  }
+  return stat;
+}
+
+function validatePinnedDirectoryIdentity(
+  openedStat: BigIntStats,
+  expectedStat: BigIntStats,
+  changedMessage: string,
+): void {
+  if (
+    !openedStat.isDirectory() ||
+    openedStat.dev !== expectedStat.dev ||
+    openedStat.ino !== expectedStat.ino
+  ) {
+    throw new Error(changedMessage);
+  }
+}
+
 async function openWorkspacePathWithinRoot(
   rootHandle: FileHandle,
   relativePath: string,
@@ -456,30 +487,38 @@ export class WorkspaceFileAuthority {
     let uploadRootHandle: FileHandle | null = null;
     let runtimeRoot: string | null = null;
     try {
-      browseRootHandle = await fs.open(
+      const browseRootChangedMessage =
+        "CODEX_WEBUI_BROWSE_ROOT changed while its authority was pinned";
+      const expectedBrowseRootStat = await captureDirectoryIdentity(
         browseRoot,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
+        browseRootChangedMessage,
       );
-      const browseStat = await browseRootHandle.stat();
-      if (!browseStat.isDirectory()) {
-        throw new Error(
-          "CODEX_WEBUI_BROWSE_ROOT changed while its authority was pinned",
-        );
-      }
+      browseRootHandle = await fs.open(browseRoot, PINNED_ROOT_OPEN_FLAGS);
+      const browseStat = await browseRootHandle.stat({ bigint: true });
+      validatePinnedDirectoryIdentity(
+        browseStat,
+        expectedBrowseRootStat,
+        browseRootChangedMessage,
+      );
 
       runtimeRoot = await fs.mkdtemp(
         path.join(temporaryParent, "codex-web-runtime-"),
       );
       const uploadRoot = path.join(runtimeRoot, "uploads");
       await fs.mkdir(uploadRoot, { mode: 0o700 });
-      uploadRootHandle = await fs.open(
+      const uploadRootChangedMessage =
+        "Workspace upload root changed while it was pinned";
+      const expectedUploadRootStat = await captureDirectoryIdentity(
         uploadRoot,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
+        uploadRootChangedMessage,
       );
-      const uploadStat = await uploadRootHandle.stat();
-      if (!uploadStat.isDirectory()) {
-        throw new Error("Workspace upload root changed while it was pinned");
-      }
+      uploadRootHandle = await fs.open(uploadRoot, PINNED_ROOT_OPEN_FLAGS);
+      const uploadStat = await uploadRootHandle.stat({ bigint: true });
+      validatePinnedDirectoryIdentity(
+        uploadStat,
+        expectedUploadRootStat,
+        uploadRootChangedMessage,
+      );
 
       return new WorkspaceFileAuthority(
         browseRoot,

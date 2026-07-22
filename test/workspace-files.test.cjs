@@ -216,6 +216,81 @@ test("browse and picker operations stay rooted in the lifetime-pinned inode", as
   assert.equal((await readStream(opened.stream)).toString(), "workspace bytes");
 });
 
+test("startup rejects browse root substitution between identity capture and open without leaks", async (t) => {
+  const item = await fixture();
+  t.after(() => fsp.rm(item.temporaryRoot, { recursive: true, force: true }));
+  const baseline = await fdCount();
+  const originalOpen = fsp.open;
+  const originalStat = fsp.stat;
+  const originalBrowseRoot = `${item.browseRoot}.original`;
+  const substitutedRoot = path.join(item.temporaryRoot, "substituted-browse");
+  await fsp.mkdir(substitutedRoot);
+  await fsp.writeFile(
+    path.join(substitutedRoot, "substituted.txt"),
+    "wrong root",
+  );
+  let identityCaptured = false;
+  let rootOpenReached = false;
+  let swapped = false;
+  t.after(() => {
+    fsp.open = originalOpen;
+    fsp.stat = originalStat;
+  });
+
+  fsp.stat = async (...arguments_) => {
+    const result = await originalStat(...arguments_);
+    const target = arguments_[0];
+    const options = arguments_[1];
+    if (
+      target === item.browseRoot &&
+      typeof options === "object" &&
+      options !== null &&
+      options.bigint === true
+    ) {
+      identityCaptured = true;
+    }
+    return result;
+  };
+
+  fsp.open = async (...arguments_) => {
+    const target = arguments_[0];
+    if (target === item.browseRoot && !swapped) {
+      rootOpenReached = true;
+      await fsp.rename(item.browseRoot, originalBrowseRoot);
+      await fsp.rename(substitutedRoot, item.browseRoot);
+      swapped = true;
+    }
+    return originalOpen(...arguments_);
+  };
+
+  const result = await WorkspaceFileAuthority.create(
+    item.browseRoot,
+    item.temporaryRoot,
+  ).then(
+    (authority) => ({ status: "fulfilled", authority }),
+    (error) => ({ status: "rejected", error }),
+  );
+  if (result.status === "fulfilled") {
+    await result.authority.cleanup();
+    assert.fail("create() accepted a substituted browse root");
+  }
+
+  assert.equal(identityCaptured, true);
+  assert.equal(rootOpenReached, true);
+  assert.equal(swapped, true);
+  assert.match(
+    result.error.message,
+    /CODEX_WEBUI_BROWSE_ROOT changed while its authority was pinned/,
+  );
+  assert.equal(await fdCount(), baseline);
+  assert.deepEqual(
+    (await fsp.readdir(item.temporaryRoot)).filter((entry) =>
+      entry.startsWith("codex-web-runtime-"),
+    ),
+    [],
+  );
+});
+
 test("opened workspace descriptor is consumed after deterministic pathname replacement", async (t) => {
   const item = await authorityFixture(t);
   const requestedPath = path.join(item.browseRoot, "a.txt");
