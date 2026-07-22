@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const fsp = require("node:fs/promises");
+const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -412,6 +413,60 @@ test("SIGTERM performs normal cleanup and closes run-owned app-server child", as
     false,
     "run-owned app-server socket survived server cleanup",
   );
+  await assertRunClean(run);
+});
+
+test("SIGTERM drains a hung multipart upload before exit", async (t) => {
+  const port = await unusedLoopbackPort();
+  const run = await createIsolatedRun(t, {
+    codexCliPath: hangingCodexCli,
+    port,
+  });
+
+  await waitFor("bridge listener", () =>
+    childOutput(run).includes("IPC bridge listening at"),
+  );
+  await waitFor("run-owned app-server child", async () => {
+    const pids = await markedProcessIds(run.runId);
+    return pids.some((pid) => pid !== run.child.pid);
+  });
+  await waitFor("run-owned app-server IPC socket", async () => {
+    for (const entry of await runtimeRoots(run.temporaryDirectory)) {
+      const runtimeRoot = path.join(run.temporaryDirectory, entry);
+      if (await pathIsSocket(path.join(runtimeRoot, "codex-ipc/ipc.sock"))) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  const boundary = `codex-web-${randomUUID()}`;
+  const uploadRequest = http.request({
+    hostname: "127.0.0.1",
+    port: run.port,
+    path: "/__backend/upload",
+    method: "POST",
+    headers: {
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+    },
+  });
+  uploadRequest.on("error", () => undefined);
+  uploadRequest.write(
+    `--${boundary}\r\nContent-Disposition: form-data; name="files"; filename="stalled.bin"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+  );
+  uploadRequest.write(Buffer.alloc(8, 0x61));
+  await waitFor(
+    "multipart upload bytes to flush",
+    () =>
+      uploadRequest.socket !== null &&
+      !uploadRequest.socket.destroyed &&
+      uploadRequest.socket.bytesWritten > 0,
+  );
+
+  run.child.kill("SIGTERM");
+  const result = await waitForExit(run, 10_000);
+  assert.equal(result.code, 0, childOutput(run));
+  uploadRequest.destroy();
   await assertRunClean(run);
 });
 

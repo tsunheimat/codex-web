@@ -289,19 +289,110 @@ function descriptorPath(handle: FileHandle, relativePath?: string): string {
   return relativePath ? path.join(root, relativePath) : root;
 }
 
-function descriptorTargetPath(target: string): string {
-  return target.endsWith(" (deleted)") ? target.slice(0, -10) : target;
-}
-
-function workspaceOpenError(error: unknown, label: string): WorkspacePathError {
+async function workspaceOpenError(
+  error: unknown,
+  label: string,
+  targetPath?: string,
+): Promise<WorkspacePathError> {
   const code = fileSystemErrorCode(error);
-  if (code === "ENOENT" || code === "ENOTDIR") {
+  if (code === "ENOENT") {
     return new WorkspacePathError(`${label} does not exist`, 404);
   }
-  if (code === "EACCES" || code === "EPERM" || code === "ELOOP") {
+  if (targetPath) {
+    try {
+      await fs.readlink(targetPath);
+      return new WorkspacePathError(
+        `${label} resolves outside its pinned authority root`,
+        403,
+      );
+    } catch {
+      // Fall through to the generic error handling below.
+    }
+  }
+  if (code === "ENOTDIR" || code === "ELOOP") {
+    return new WorkspacePathError(`${label} does not exist`, 404);
+  }
+  if (code === "EACCES" || code === "EPERM") {
     return new WorkspacePathError(`${label} is not authorized`, 403);
   }
   return new WorkspacePathError(`${label} cannot be opened`);
+}
+
+type OpenedWorkspacePath = {
+  handle: FileHandle;
+  ownsHandle: boolean;
+  stat: BigIntStats;
+};
+
+async function openWorkspacePathWithinRoot(
+  rootHandle: FileHandle,
+  relativePath: string,
+  label: string,
+  targetType: "directory" | "file",
+): Promise<OpenedWorkspacePath> {
+  const segments = relativePath.split(path.sep).filter(Boolean);
+  if (segments.length === 0) {
+    const stat = await rootHandle.stat({ bigint: true });
+    if (targetType === "directory" && !stat.isDirectory()) {
+      throw new WorkspacePathError(`${label} is not a directory`);
+    }
+    if (targetType === "file" && !stat.isFile()) {
+      throw new WorkspacePathError(`${label} is not a regular file`);
+    }
+    return { handle: rootHandle, ownsHandle: false, stat };
+  }
+
+  const openedHandles: FileHandle[] = [];
+  try {
+    let currentHandle = rootHandle;
+    for (let index = 0; index < segments.length; index++) {
+      const segment = segments[index]!;
+      const isFinal = index === segments.length - 1;
+      const flags =
+        constants.O_RDONLY |
+        constants.O_NONBLOCK |
+        constants.O_NOFOLLOW |
+        (!isFinal || targetType === "directory" ? constants.O_DIRECTORY : 0);
+      let nextHandle: FileHandle;
+      try {
+        nextHandle = await fs.open(
+          descriptorPath(currentHandle, segment),
+          flags,
+        );
+      } catch (error) {
+        throw await workspaceOpenError(
+          error,
+          label,
+          descriptorPath(currentHandle, segment),
+        );
+      }
+      openedHandles.push(nextHandle);
+      currentHandle = nextHandle;
+    }
+
+    const openedStat = await currentHandle.stat({ bigint: true });
+    if (targetType === "directory") {
+      if (!openedStat.isDirectory()) {
+        throw new WorkspacePathError(`${label} is not a directory`);
+      }
+    } else if (!openedStat.isFile()) {
+      throw new WorkspacePathError(`${label} is not a regular file`);
+    }
+
+    await Promise.allSettled(
+      openedHandles.slice(0, -1).map((handle) => closeHandle(handle)),
+    );
+    return {
+      handle: openedHandles.at(-1)!,
+      ownsHandle: true,
+      stat: openedStat,
+    };
+  } catch (error) {
+    await Promise.allSettled(
+      openedHandles.map((handle) => closeHandle(handle)),
+    );
+    throw error;
+  }
 }
 
 function unsafeUploadDiscardError(): WorkspacePathError {
@@ -370,10 +461,7 @@ export class WorkspaceFileAuthority {
         constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
       );
       const browseStat = await browseRootHandle.stat();
-      const browseTarget = descriptorTargetPath(
-        await fs.readlink(descriptorPath(browseRootHandle)),
-      );
-      if (!browseStat.isDirectory() || browseTarget !== browseRoot) {
+      if (!browseStat.isDirectory()) {
         throw new Error(
           "CODEX_WEBUI_BROWSE_ROOT changed while its authority was pinned",
         );
@@ -389,10 +477,7 @@ export class WorkspaceFileAuthority {
         constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
       );
       const uploadStat = await uploadRootHandle.stat();
-      const uploadTarget = descriptorTargetPath(
-        await fs.readlink(descriptorPath(uploadRootHandle)),
-      );
-      if (!uploadStat.isDirectory() || uploadTarget !== uploadRoot) {
+      if (!uploadStat.isDirectory()) {
         throw new Error("Workspace upload root changed while it was pinned");
       }
 
@@ -488,38 +573,6 @@ export class WorkspaceFileAuthority {
     );
   }
 
-  private async validateOpenedTarget(
-    handle: FileHandle,
-    rootHandle: FileHandle,
-    relativePath: string,
-    label: string,
-  ): Promise<BigIntStats> {
-    const [openedStat, openedLink, rootLink] = await Promise.all([
-      handle.stat({ bigint: true }),
-      fs.readlink(descriptorPath(handle)),
-      fs.readlink(descriptorPath(rootHandle)),
-    ]);
-    const openedTarget = descriptorTargetPath(openedLink);
-    const rootTarget = descriptorTargetPath(rootLink);
-    if (
-      !path.isAbsolute(openedTarget) ||
-      !path.isAbsolute(rootTarget) ||
-      !isPathInside(openedTarget, rootTarget)
-    ) {
-      throw new WorkspacePathError(
-        `${label} resolves outside its pinned authority root`,
-        403,
-      );
-    }
-    const expectedTarget = relativePath
-      ? path.join(rootTarget, relativePath)
-      : rootTarget;
-    if (openedTarget !== expectedTarget) {
-      throw new WorkspacePathError(`${label} must not contain symlinks`, 403);
-    }
-    return openedStat;
-  }
-
   async getWorkspaceDirectoryEntries(
     directoryPath: string | null,
     directoriesOnly: boolean,
@@ -528,30 +581,19 @@ export class WorkspaceFileAuthority {
     const requested = directoryPath?.trim() || this.browseRoot;
     const classified = this.classifyPath(requested, false);
     const finishOperation = this.beginAuthorityOperation();
-    let handle: FileHandle | null = null;
+    let opened: OpenedWorkspacePath | null = null;
     try {
-      try {
-        handle = await fs.open(
-          descriptorPath(this.browseRootHandle, classified.relativePath),
-          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
-        );
-      } catch (error) {
-        throw workspaceOpenError(error, "Workspace directory");
-      }
-      const openedStat = await this.validateOpenedTarget(
-        handle,
+      opened = await openWorkspacePathWithinRoot(
         this.browseRootHandle,
         classified.relativePath,
         "Workspace directory",
+        "directory",
       );
       this.assertActive();
-      if (!openedStat.isDirectory()) {
-        throw new WorkspacePathError("Workspace directory is not a directory");
-      }
 
       // Readdir is rooted at the already-open descriptor. The caller pathname
       // is never reopened, so replacing it cannot change the consumed inode.
-      const directoryEntries = await fs.readdir(descriptorPath(handle), {
+      const directoryEntries = await fs.readdir(descriptorPath(opened.handle), {
         withFileTypes: true,
       });
       const entries = directoryEntries
@@ -586,7 +628,9 @@ export class WorkspaceFileAuthority {
       };
     } finally {
       try {
-        await closeHandle(handle);
+        if (opened?.ownsHandle) {
+          await closeHandle(opened.handle);
+        }
       } finally {
         finishOperation();
       }
@@ -637,12 +681,7 @@ export class WorkspaceFileAuthority {
       }
       activeUpload.handle = handle;
       this.assertActive();
-      const openedStat = await this.validateOpenedTarget(
-        handle,
-        this.uploadRootHandle,
-        storageName,
-        "Upload file",
-      );
+      const openedStat = await handle.stat({ bigint: true });
       if (!openedStat.isFile()) {
         throw new Error("Upload storage target is not a regular file");
       }
@@ -749,32 +788,25 @@ export class WorkspaceFileAuthority {
     const finishOperation = this.beginAuthorityOperation();
     let handle: FileHandle | null = null;
     try {
+      let openedStat!: BigIntStats;
       try {
-        handle = await fs.open(
-          descriptorPath(this.uploadRootHandle, record.storageName),
-          constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-        );
-      } catch {
-        throw unsafeUploadDiscardError();
-      }
-
-      let openedStat: BigIntStats;
-      try {
-        openedStat = await this.validateOpenedTarget(
-          handle,
+        const opened = await openWorkspacePathWithinRoot(
           this.uploadRootHandle,
           record.storageName,
           "Registered upload",
+          "file",
         );
+        handle = opened.handle;
+        openedStat = opened.stat;
+        if (
+          !openedStat.isFile() ||
+          openedStat.dev !== record.device ||
+          openedStat.ino !== record.inode ||
+          openedStat.size !== BigInt(record.bytes)
+        ) {
+          throw unsafeUploadDiscardError();
+        }
       } catch {
-        throw unsafeUploadDiscardError();
-      }
-      if (
-        !openedStat.isFile() ||
-        openedStat.dev !== record.device ||
-        openedStat.ino !== record.inode ||
-        openedStat.size !== BigInt(record.bytes)
-      ) {
         throw unsafeUploadDiscardError();
       }
 
@@ -825,25 +857,18 @@ export class WorkspaceFileAuthority {
         ? this.uploadRootHandle
         : this.browseRootHandle;
     let handle: FileHandle | null = null;
+    let shouldCloseHandle = false;
     try {
-      try {
-        handle = await fs.open(
-          descriptorPath(rootHandle, classified.relativePath),
-          constants.O_RDONLY | constants.O_NONBLOCK,
-        );
-      } catch (error) {
-        throw workspaceOpenError(error, "File path");
-      }
-      const stat = await this.validateOpenedTarget(
-        handle,
+      const opened = await openWorkspacePathWithinRoot(
         rootHandle,
         classified.relativePath,
-        "File",
+        "File path",
+        "file",
       );
+      handle = opened.handle;
+      shouldCloseHandle = opened.ownsHandle;
+      const stat = opened.stat;
       this.assertActive();
-      if (!stat.isFile()) {
-        throw new WorkspacePathError("File path is not a regular file");
-      }
 
       let downloadName: string;
       if (classified.root === "upload") {
@@ -877,7 +902,9 @@ export class WorkspaceFileAuthority {
         stream,
       };
     } catch (error) {
-      await closeHandle(handle).catch(() => undefined);
+      if (shouldCloseHandle) {
+        await closeHandle(handle).catch(() => undefined);
+      }
       throw error;
     } finally {
       finishOperation();

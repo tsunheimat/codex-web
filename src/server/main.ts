@@ -112,6 +112,13 @@ type ServerCleanupAuthority = {
   cleanup: () => Promise<void>;
 };
 
+function closeActiveHttpConnections(app: FastifyInstance): void {
+  const server = app.server as typeof app.server & {
+    closeAllConnections?: () => void;
+  };
+  server.closeAllConnections?.();
+}
+
 function printUsage(): void {
   console.log(
     [
@@ -279,16 +286,24 @@ function createServerCleanupAuthority({
         cleanupErrors.push(error);
       }
 
-      try {
-        await app.close();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
+      const authorityCleanupPromise = Promise.resolve()
+        .then(() => workspaceFileAuthority.cleanup())
+        .finally(() => closeActiveHttpConnections(app));
+      const [appCloseResult, desktopShutdownResult, authorityCleanupResult] =
+        await Promise.allSettled([
+          Promise.resolve().then(() => app.close()),
+          Promise.resolve().then(() => bridgeState.shutdownDesktopApp?.()),
+          authorityCleanupPromise,
+        ]);
 
-      try {
-        await bridgeState.shutdownDesktopApp?.();
-      } catch (error) {
-        cleanupErrors.push(error);
+      if (appCloseResult.status === "rejected") {
+        cleanupErrors.push(appCloseResult.reason);
+      }
+      if (desktopShutdownResult.status === "rejected") {
+        cleanupErrors.push(desktopShutdownResult.reason);
+      }
+      if (authorityCleanupResult.status === "rejected") {
+        cleanupErrors.push(authorityCleanupResult.reason);
       }
 
       bridgeState.broadcastToRenderer = undefined;
@@ -296,12 +311,6 @@ function createServerCleanupAuthority({
       bridgeState.handleRendererSend = undefined;
       bridgeState.shutdownDesktopApp = undefined;
       disposeRendererRecovery();
-
-      try {
-        await workspaceFileAuthority.cleanup();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
 
       removeSignalHandlers();
       if (cleanupErrors.length > 0) {

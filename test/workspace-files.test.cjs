@@ -256,6 +256,80 @@ test("actual-open validation rejects intermediate and final symlink escapes", as
   assert.equal(item.authority.getActiveDescriptorState().readDescriptors, 0);
 });
 
+test("component walk rejects a procfd link-text race that swaps in a symlink target", async (t) => {
+  const item = await authorityFixture(t);
+  const escapedPath = path.join(item.browseRoot, "escape-file");
+  const outsideRaceFile = path.join(item.outsideRoot, "secret.txt");
+
+  const originalOpen = fsp.open;
+  const originalReadlink = fsp.readlink;
+  const originalRename = fsp.rename;
+  let releaseReadlink;
+  let settleRaceMutation;
+  let openAttempted = false;
+  const readlinkBarrier = new Promise((resolve) => {
+    releaseReadlink = resolve;
+  });
+  const raceMutation = new Promise((resolve, reject) => {
+    settleRaceMutation = { resolve, reject };
+  });
+  t.after(() => {
+    fsp.open = originalOpen;
+    fsp.readlink = originalReadlink;
+    fsp.rename = originalRename;
+  });
+
+  fsp.readlink = async (...arguments_) => {
+    const target = arguments_[0];
+    if (typeof target === "string" && target.startsWith("/proc/self/fd/")) {
+      await readlinkBarrier;
+    }
+    return originalReadlink(...arguments_);
+  };
+
+  fsp.open = async (...arguments_) => {
+    const target = arguments_[0];
+    if (
+      typeof target === "string" &&
+      target.startsWith("/proc/self/fd/") &&
+      target.endsWith(`${path.sep}escape-file`)
+    ) {
+      try {
+        return await originalOpen(...arguments_);
+      } finally {
+        openAttempted = true;
+        void (async () => {
+          try {
+            await originalRename(outsideRaceFile, escapedPath);
+            settleRaceMutation.resolve();
+          } catch (error) {
+            settleRaceMutation.reject(error);
+          } finally {
+            releaseReadlink();
+          }
+        })();
+      }
+    }
+    return originalOpen(...arguments_);
+  };
+
+  const openResultPromise = item.authority.openAllowedFile(escapedPath).then(
+    (value) => ({ status: "fulfilled", value }),
+    (error) => ({ status: "rejected", error }),
+  );
+
+  await waitFor("symlink open attempt", () => openAttempted);
+  await raceMutation;
+  const openResult = await openResultPromise;
+  assert.equal(openResult.status, "rejected");
+  assert(openResult.error instanceof WorkspacePathError);
+  assert.match(
+    openResult.error.message,
+    /pinned authority root|does not exist|not authorized|cannot be opened/,
+  );
+  assert.equal(await fsp.readFile(escapedPath, "utf8"), "outside");
+});
+
 test("substituted upload discard fails closed and retains registration until authority cleanup", async (t) => {
   const item = await authorityFixture(t, 64);
   const upload = await item.authority.storeUpload(
