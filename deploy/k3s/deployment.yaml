@@ -1,0 +1,193 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codex-web
+  labels:
+    app.kubernetes.io/name: codex-web
+    app.kubernetes.io/instance: codex-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codex-web
+      app.kubernetes.io/instance: codex-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codex-web
+        app.kubernetes.io/instance: codex-web
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      # Private GHCR deployments should add imagePullSecrets in an operator overlay.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: bootstrap-codex-home
+          # Override this image with Kustomize to an immutable tag such as
+          # ghcr.io/tsunheimat/codex-web:sha-<full SHA> for reproducible deploys.
+          image: ghcr.io/tsunheimat/codex-web:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ceu
+          args:
+            - |
+              config_src=/bootstrap-config/config.toml
+              auth_src=/bootstrap-auth/auth.json
+              codex_home=/home/codex-web/.codex
+
+              if [ ! -s "$config_src" ]; then
+                echo "missing or empty $config_src" >&2
+                exit 1
+              fi
+
+              if [ ! -s "$auth_src" ]; then
+                echo "missing or empty $auth_src" >&2
+                exit 1
+              fi
+
+              umask 077
+              mkdir -p "$codex_home"
+
+              config_tmp=
+              auth_tmp=
+              cleanup() {
+                if [ -n "$config_tmp" ]; then
+                  rm -f "$config_tmp"
+                fi
+                if [ -n "$auth_tmp" ]; then
+                  rm -f "$auth_tmp"
+                fi
+              }
+              trap cleanup EXIT HUP INT TERM
+              config_tmp="$(mktemp "$codex_home/.config.toml.tmp.XXXXXX")"
+              auth_tmp="$(mktemp "$codex_home/.auth.json.tmp.XXXXXX")"
+
+              cp "$config_src" "$config_tmp"
+              cp "$auth_src" "$auth_tmp"
+              chmod 0600 "$config_tmp" "$auth_tmp"
+              mv -f "$config_tmp" "$codex_home/config.toml"
+              mv -f "$auth_tmp" "$codex_home/auth.json"
+
+              trap - EXIT HUP INT TERM
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: codex-home
+              mountPath: /home/codex-web/.codex
+            - name: bootstrap-config
+              mountPath: /bootstrap-config
+              readOnly: true
+            - name: bootstrap-auth
+              mountPath: /bootstrap-auth
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: webui
+          # Keep this image name identical to the init container so Kustomize
+          # image replacements update both references.
+          image: ghcr.io/tsunheimat/codex-web:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /home/codex-web
+            - name: CODEX_HOME
+              value: /home/codex-web/.codex
+            - name: CODEX_WEBUI_BROWSE_ROOT
+              value: /workspace
+          ports:
+            - name: http
+              containerPort: 8214
+          startupProbe:
+            tcpSocket:
+              port: 8214
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 24
+          readinessProbe:
+            tcpSocket:
+              port: 8214
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8214
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 1
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: codex-home
+              mountPath: /home/codex-web/.codex
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: codex-home
+          persistentVolumeClaim:
+            claimName: codex-web-codex-home
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: codex-web-workspace
+        - name: tmp
+          emptyDir: {}
+        # The ConfigMap and Secret are operator-owned external inputs. Changes
+        # require a rollout because the init container copies them only at Pod start.
+        - name: bootstrap-config
+          configMap:
+            name: codex-web-codex-config
+            defaultMode: 0440
+            items:
+              - key: config.toml
+                path: config.toml
+        - name: bootstrap-auth
+          secret:
+            secretName: codex-web-oauth
+            defaultMode: 0440
+            items:
+              - key: auth.json
+                path: auth.json
