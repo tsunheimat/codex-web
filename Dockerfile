@@ -45,6 +45,7 @@ FROM ${NODE_IMAGE} AS runtime
 ARG CODEX_VERSION=0.145.0
 
 ENV NODE_ENV=production \
+    HOME=/home/codex-web \
     CODEX_HOME=/home/codex-web/.codex \
     CODEX_WEBUI_BROWSE_ROOT=/workspace \
     CODEX_CLI_PATH=/usr/local/bin/codex \
@@ -60,29 +61,18 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
-    && groupadd --gid 10001 codex-web \
-    && useradd \
-      --uid 10001 \
-      --gid codex-web \
-      --create-home \
-      --home-dir /home/codex-web \
-      --shell /usr/sbin/nologin \
-      codex-web \
-    && mkdir -p /app /workspace "${CODEX_HOME}" \
-    && chown -R codex-web:codex-web /app /workspace /home/codex-web
+    && mkdir -p /app /workspace /home/codex-web "${CODEX_HOME}"
 
 WORKDIR /app
 
-COPY --from=build --chown=codex-web:codex-web /app/package.json /app/package-lock.json ./
-COPY --from=build --chown=codex-web:codex-web /app/node_modules ./node_modules
-COPY --from=build --chown=codex-web:codex-web /app/src/server ./src/server
-COPY --from=build --chown=codex-web:codex-web /app/scratch/asar ./scratch/asar
+COPY --from=build /app/package.json /app/package-lock.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/src/server ./src/server
+COPY --from=build /app/scratch/asar ./scratch/asar
 
 EXPOSE 8214
 
 VOLUME ["/workspace", "/home/codex-web/.codex"]
-
-USER codex-web
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "src/server/main.js", "--host", "0.0.0.0", "--port", "8214"]

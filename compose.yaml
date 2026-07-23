@@ -18,7 +18,7 @@ services:
       CODEX_WEBUI_BROWSE_ROOT: /workspace
     volumes:
       - codex-web-codex-home:/home/codex-web/.codex
-      # The host workspace must be writable by the container user UID/GID 10001.
+      # The host workspace must be writable by the container user your runtime uses.
       - type: bind
         source: "${CODEX_WEB_WORKSPACE_DIR:-./workspace}"
         target: /workspace

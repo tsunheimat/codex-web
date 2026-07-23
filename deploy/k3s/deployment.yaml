@@ -24,11 +24,6 @@ spec:
       terminationGracePeriodSeconds: 30
       # Private GHCR deployments should add imagePullSecrets in an operator overlay.
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        fsGroup: 10001
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -81,9 +76,6 @@ spec:
 
               trap - EXIT HUP INT TERM
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -144,9 +136,6 @@ spec:
             timeoutSeconds: 1
             failureThreshold: 3
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 10001
-            runAsGroup: 10001
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:

@@ -50,7 +50,6 @@ first if your environment requires authenticated access.
 
 ```bash
 mkdir -p workspace
-sudo chown -R 10001:10001 workspace
 docker compose up -d
 ```
 
@@ -61,10 +60,11 @@ local `.env` as needed. Use `CODEX_WEB_BIND_ADDRESS=0.0.0.0` only behind a
 trusted reverse proxy; anyone who can reach codex-web can operate Codex as the
 container user.
 
-The container runs as UID/GID `10001`, so the host workspace bind mount must be
-writable by that identity. Codex credentials and config are stored in the
-`codex-web-codex-home` volume, and no credentials are embedded in Compose or
-`.env.example`. Sign in once from the container if needed:
+The image uses its default container user, so operators are responsible for
+making bind-mounted volumes writable for the user the container runs as. Codex
+credentials and config are stored in the `codex-web-codex-home` volume, and no
+credentials are embedded in Compose or `.env.example`. Sign in once from the
+container if needed:
 
 ```bash
 docker compose run --rm codex-web codex login --device-auth
