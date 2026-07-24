@@ -6,7 +6,8 @@ const SUPPORTED_ENVELOPE_TYPES = new Set([
   "mcp-request",
   "thread-prewarm-start",
 ]);
-const MCP_REQUEST_CHANNEL = "codex_desktop:message-from-view";
+export const MCP_REQUEST_CHANNEL = "codex_desktop:message-from-view";
+export const MCP_RESPONSE_CHANNEL = "codex_desktop:message-for-view";
 const ABSOLUTE_PATH_ARRAY_KEYS = new Set([
   "runtimeWorkspaceRoots",
   "writableRoots",

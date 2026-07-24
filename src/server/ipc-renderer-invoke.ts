@@ -1,5 +1,7 @@
 import os from "node:os";
 import {
+  MCP_REQUEST_CHANNEL,
+  MCP_RESPONSE_CHANNEL,
   sanitizeRendererInvokeMcpRequestPaths,
   type SanitizedPathChange,
 } from "./mcp-request-path-sanitizer";
@@ -54,4 +56,59 @@ export function rendererInvokeErrorMessage(error: unknown): string {
     return error.stack ?? error.message;
   }
   return String(error);
+}
+
+export type SyntheticMcpErrorEvent = {
+  type: "ipc-main-event";
+  channel: typeof MCP_RESPONSE_CHANNEL;
+  args: unknown[];
+};
+
+/**
+ * The renderer sends app-server requests fire-and-forget: a rejected invoke
+ * only produces a console warning while the request promise keeps waiting for
+ * a message-for-view response until its 30s timeout. Convert a workspace-path
+ * rejection of an mcp-request into that response so the UI fails immediately
+ * with the real error instead of spinning.
+ */
+export function syntheticMcpErrorEventForRejectedInvoke(
+  message: RendererInvokeMessage,
+  error: unknown,
+): SyntheticMcpErrorEvent | null {
+  if (!(error instanceof WorkspacePathError)) {
+    return null;
+  }
+  if (message.channel !== MCP_REQUEST_CHANNEL || message.args.length !== 1) {
+    return null;
+  }
+  const envelope = message.args[0];
+  if (typeof envelope !== "object" || envelope === null) {
+    return null;
+  }
+  const { type, hostId, request } = envelope as {
+    type?: unknown;
+    hostId?: unknown;
+    request?: unknown;
+  };
+  if (type !== "mcp-request" || typeof request !== "object" || request === null) {
+    return null;
+  }
+  const id = (request as { id?: unknown }).id;
+  if (typeof id !== "string" && typeof id !== "number") {
+    return null;
+  }
+  return {
+    type: "ipc-main-event",
+    channel: MCP_RESPONSE_CHANNEL,
+    args: [
+      {
+        type: "mcp-response",
+        hostId: typeof hostId === "string" ? hostId : "local",
+        message: {
+          id,
+          error: { code: -32602, message: error.message },
+        },
+      },
+    ],
+  };
 }

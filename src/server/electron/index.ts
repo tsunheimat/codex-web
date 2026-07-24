@@ -1,3 +1,7 @@
+import os from "node:os";
+
+const HOME_DIRECTORY = os.homedir();
+
 type StubFunction = (...args: unknown[]) => unknown;
 type StubListener = (...args: unknown[]) => void;
 type StubWebContents = {
@@ -82,6 +86,17 @@ function createDeepStub(pathLabel: string): StubFunction {
       }
 
       return createDeepStub(`${pathLabel}.${String(prop)}`);
+    },
+  });
+}
+
+function withDeepStubFallback<T extends object>(target: T, label: string): T {
+  return new Proxy(target, {
+    get(currentTarget, prop) {
+      if (prop in currentTarget) {
+        return currentTarget[prop as keyof T];
+      }
+      return createDeepStub(`${label}.${String(prop)}`);
     },
   });
 }
@@ -314,6 +329,16 @@ const appBase = {
   },
   getPath(name: string): string {
     log("app.getPath", [name]);
+    // The desktop app derives user-facing workspace locations from these two
+    // paths ("Start from scratch" projects and projectless thread cwds). They
+    // must land inside the pinned browse root or the request-path sanitizer
+    // rejects every thread started there.
+    if (name === "home") {
+      return HOME_DIRECTORY;
+    }
+    if (name === "documents" || name === "desktop") {
+      return globalThis.__CODEX_SHIM_VALUES__?.browseRoot ?? process.cwd();
+    }
     return process.cwd();
   },
   getAppMetrics(): unknown[] {
@@ -408,15 +433,10 @@ const appBase = {
   },
 };
 
-const app = new Proxy(appBase as Record<string, unknown>, {
-  get(target, prop) {
-    if (prop in target) {
-      return target[prop as keyof typeof target];
-    }
-
-    return createDeepStub(`app.${String(prop)}`);
-  },
-}) as typeof appBase;
+const app = withDeepStubFallback(
+  appBase as Record<string, unknown>,
+  "app",
+) as typeof appBase;
 
 getIpcMainBridgeState().shutdownDesktopApp = shutdownDesktopApp;
 
@@ -439,7 +459,7 @@ class BrowserWindow {
     const webContentsEmitter = createEmitterStub(
       `BrowserWindow#${this.id}.webContents`,
     );
-    this.webContents = new Proxy(
+    this.webContents = withDeepStubFallback(
       {
         ...webContentsEmitter,
         id: this.id * 1000 + 1,
@@ -480,28 +500,16 @@ class BrowserWindow {
           });
         },
       } as Record<string, unknown>,
-      {
-        get: (target, prop) => {
-          if (prop in target) {
-            return target[prop as keyof typeof target];
-          }
-          return createDeepStub(
-            `BrowserWindow#${this.id}.webContents.${String(prop)}`,
-          );
-        },
-      },
+      `BrowserWindow#${this.id}.webContents`,
     );
 
-    BrowserWindow.allWindows.push(this);
-    BrowserWindow.focusedWindow = this;
-    return new Proxy(this, {
-      get: (target, prop) => {
-        if (prop in target) {
-          return target[prop as keyof typeof target];
-        }
-        return createDeepStub(`BrowserWindow#${target.id}.${String(prop)}`);
-      },
-    });
+    // Register the proxied instance, not the raw one: windows handed out by
+    // getAllWindows()/getFocusedWindow() must keep the deep-stub fallback for
+    // methods this stub does not implement.
+    const proxied = withDeepStubFallback(this, `BrowserWindow#${this.id}`);
+    BrowserWindow.allWindows.push(proxied);
+    BrowserWindow.focusedWindow = proxied;
+    return proxied;
   }
 
   static getAllWindows(): BrowserWindow[] {
@@ -580,6 +588,11 @@ class BrowserWindow {
   isFocused(): boolean {
     log(`BrowserWindow#${this.id}.isFocused`, []);
     return BrowserWindow.focusedWindow === this && !this.destroyed;
+  }
+
+  isVisible(): boolean {
+    log(`BrowserWindow#${this.id}.isVisible`, []);
+    return !this.destroyed;
   }
 
   removeMenu(): void {
@@ -986,7 +999,7 @@ class MessageChannelMain {
   port2 = createMessagePortStub("MessageChannelMain.port2");
 }
 
-const electronModule = new Proxy(
+const electronModule = withDeepStubFallback(
   {
     app,
     BrowserWindow,
@@ -1010,15 +1023,7 @@ const electronModule = new Proxy(
     webContents,
     dialog,
   } as Record<string, unknown>,
-  {
-    get(target, prop) {
-      if (prop in target) {
-        return target[prop as keyof typeof target];
-      }
-
-      return createDeepStub(`electron.${String(prop)}`);
-    },
-  },
+  "electron",
 );
 
 export {

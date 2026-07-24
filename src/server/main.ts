@@ -3,6 +3,7 @@
 declare global {
   var __CODEX_SHIM_VALUES__: {
     version: string;
+    browseRoot: string;
   };
 }
 
@@ -24,6 +25,7 @@ import {
 import {
   invokeRendererRequest,
   rendererInvokeErrorMessage,
+  syntheticMcpErrorEventForRejectedInvoke,
   type RendererInvokeMessage,
 } from "./ipc-renderer-invoke";
 import {
@@ -646,6 +648,13 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
             ok: false,
             errorMessage: rendererInvokeErrorMessage(error),
           });
+          const syntheticResponse = syntheticMcpErrorEventForRejectedInvoke(
+            message,
+            error,
+          );
+          if (syntheticResponse) {
+            session.send(syntheticResponse);
+          }
         });
     }
   }
@@ -659,6 +668,14 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   await startupStep(async () => {
     ensureElectronLikeProcessContext();
     installModuleAliasHook();
+
+    if (process.env.CODEX_WEBUI_BROWSE_ROOT?.trim()) {
+      // The desktop bundle (shell-projectless-browse-root.patch) and child
+      // processes read this env value directly. A relative or symlinked
+      // configured root would diverge from the canonical root the request
+      // sanitizer pins to, so rewrite it to the canonical form.
+      process.env.CODEX_WEBUI_BROWSE_ROOT = workspaceFileAuthority.browseRoot;
+    }
 
     if (ownsAppServerRuntime) {
       // The default Desktop app-server creates TMPDIR/codex-ipc/ipc.sock but
@@ -678,6 +695,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     globalThis.__CODEX_SHIM_VALUES__ = {
       version: packageJson.version,
+      browseRoot: workspaceFileAuthority.browseRoot,
     };
 
     const matches = await glob("../../scratch/asar/.vite/build/main-*.js", {

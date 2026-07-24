@@ -88,3 +88,80 @@ test("absolute and tilde cwd values are canonicalized before IPC forwarding", as
     [nested, nested],
   );
 });
+
+test("a workspace-path rejection produces a renderer-visible mcp-response error", async (t) => {
+  const {
+    syntheticMcpErrorEventForRejectedInvoke,
+  } = require("../src/server/ipc-renderer-invoke.js");
+  const temporaryRoot = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "codex-web-ipc-synthetic-error-"),
+  );
+  const browseRoot = path.join(temporaryRoot, "browse");
+  const outside = path.join(temporaryRoot, "outside");
+  await fsp.mkdir(browseRoot);
+  await fsp.mkdir(outside);
+  t.after(() => fsp.rm(temporaryRoot, { recursive: true, force: true }));
+
+  const message = {
+    type: "ipc-renderer-invoke",
+    requestId: "synthetic-error-request",
+    channel: CHANNEL,
+    args: [
+      {
+        type: "mcp-request",
+        hostId: "local",
+        request: {
+          id: "mcp-request-id-1",
+          method: "thread/start",
+          params: { cwd: outside },
+        },
+      },
+    ],
+    sourceUrl: "http://127.0.0.1/",
+  };
+  const error = await invokeRendererRequest(
+    message,
+    browseRoot,
+    async () => "forwarded",
+    temporaryRoot,
+  ).then(
+    () => null,
+    (caught) => caught,
+  );
+  assert(error);
+  assert.equal(
+    rendererInvokeErrorMessage(error),
+    "cwd is outside CODEX_WEBUI_BROWSE_ROOT",
+  );
+
+  const event = syntheticMcpErrorEventForRejectedInvoke(message, error);
+  assert.deepEqual(event, {
+    type: "ipc-main-event",
+    channel: "codex_desktop:message-for-view",
+    args: [
+      {
+        type: "mcp-response",
+        hostId: "local",
+        message: {
+          id: "mcp-request-id-1",
+          error: {
+            code: -32602,
+            message: "cwd is outside CODEX_WEBUI_BROWSE_ROOT",
+          },
+        },
+      },
+    ],
+  });
+
+  // Non-workspace errors and prewarm envelopes must not fabricate responses.
+  assert.equal(
+    syntheticMcpErrorEventForRejectedInvoke(message, new Error("other")),
+    null,
+  );
+  const prewarm = structuredClone(message);
+  prewarm.args[0].type = "thread-prewarm-start";
+  assert.equal(syntheticMcpErrorEventForRejectedInvoke(prewarm, error), null);
+  const missingId = structuredClone(message);
+  delete missingId.args[0].request.id;
+  assert.equal(syntheticMcpErrorEventForRejectedInvoke(missingId, error), null);
+});

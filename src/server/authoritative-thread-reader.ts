@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { isValidRendererThreadId } from "./renderer-recovery";
-
-const APP_SERVER_VIEW_CHANNEL = "codex_desktop:message-from-view";
-const APP_SERVER_RESPONSE_CHANNEL = "codex_desktop:message-for-view";
+import {
+  MCP_REQUEST_CHANNEL as APP_SERVER_VIEW_CHANNEL,
+  MCP_RESPONSE_CHANNEL as APP_SERVER_RESPONSE_CHANNEL,
+} from "./mcp-request-path-sanitizer";
 const TURN_STATUSES = new Set([
   "completed",
   "interrupted",

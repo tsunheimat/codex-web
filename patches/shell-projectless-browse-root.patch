@@ -1,0 +1,12 @@
+--- a/.vite/build/src-Ct4P_yu5.js
++++ b/.vite/build/src-Ct4P_yu5.js
+@@ -14920,7 +14920,8 @@
+ }
+ var RS = 5;
+ function zS({ homeDirectory: e, path: t }) {
+-  return t.join(e, `Documents`, `Codex`);
++  let n = process.env.CODEX_WEBUI_BROWSE_ROOT?.trim();
++  return n ? t.join(n, `Codex`) : t.join(e, `Documents`, `Codex`);
+ }
+ function BS({ date: e = new Date(), path: t, workspaceRoot: n }) {
+   return t.join(n, HS(e));
