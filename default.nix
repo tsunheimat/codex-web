@@ -16,10 +16,10 @@ flake-utils.lib.eachSystem systems (
   system:
   let
     pkgs = import nixpkgs { inherit system; };
-    appVersion = "26.707.30751";
+    appVersion = "26.721.30844";
     codexZip = pkgs.fetchurl {
       url = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-${appVersion}.zip";
-      hash = "sha256-+BAjhFrlbruYs0nkvIHXtJBTNWSJfOoOpPxKFxBPOJI=";
+      hash = "sha256-KV23v9Rvzj94xPvV3J3tYe82SPwt+GuqoTAVuyEne5s=";
     };
     codex = self.packages.${system}.codex;
   in
@@ -147,6 +147,7 @@ flake-utils.lib.eachSystem systems (
           npmPruneFlags = [ "--ignore-scripts" ];
 
           nativeBuildInputs = [
+            pkgs.makeWrapper
             pkgs.unzip
             pkgs.patch
           ];
@@ -184,6 +185,11 @@ flake-utils.lib.eachSystem systems (
             nodePty="$out/lib/node_modules/codex-web/node_modules/node-pty"
             rm -rf "$nodePty/build"
             ln -s ${nodePtyNative}/build "$nodePty/build"
+          '';
+
+          postFixup = ''
+            wrapProgram "$out/bin/codex-web" \
+              --set CODEX_CLI_PATH ${pkgs.lib.getExe' codex "codex"}
           '';
         };
 
