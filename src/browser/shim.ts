@@ -651,6 +651,18 @@ Object.assign(globalThis, {
   },
 });
 
+// Unified ChatGPT+Codex sidebar master gate. When it is on and the user has
+// fewer than two saved projects, a one-time initialization effect permanently
+// locks the sidebar to the ungrouped "In one list" mode instead of the
+// project-grouped default.
+const FLAT_SIDEBAR_LOCK_GATES = new Set([
+  "12346831",
+  // Quick-chat rollout pair: their conjunction enables the same lock effect
+  // through a second path, plus unified-sidebar surfaces we do not support.
+  "3476143199",
+  "824038554",
+]);
+
 electronShim.overrideAdapter = {
   getGateOverride(evaluation) {
     if (evaluation.name === "1042620455") {
@@ -658,6 +670,15 @@ electronShim.overrideAdapter = {
       return {
         ...evaluation,
         value: true,
+      };
+    }
+
+    if (FLAT_SIDEBAR_LOCK_GATES.has(evaluation.name)) {
+      // Pin the sidebar to the project-grouped baseline the browser wrapper
+      // is tested against, regardless of remote flag state.
+      return {
+        ...evaluation,
+        value: false,
       };
     }
 
