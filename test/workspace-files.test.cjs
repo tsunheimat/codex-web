@@ -10,7 +10,9 @@ const {
   attachmentContentDisposition,
   canonicalizeBrowseRoot,
   DEFAULT_UPLOAD_QUOTA_BYTES,
+  parseAllowAnyProject,
   parseUploadQuotaBytes,
+  resolveConfiguredBrowseRoot,
   resolveBoundedDirectory,
   safeDownloadName,
   WorkspaceFileAuthority,
@@ -80,6 +82,10 @@ test("canonicalizes the configured root and fails clearly for invalid roots", as
   t.after(() => fsp.rm(item.temporaryRoot, { recursive: true, force: true }));
   assert.equal(canonicalizeBrowseRoot(item.browseRoot), item.browseRoot);
   assert.throws(
+    () => canonicalizeBrowseRoot(""),
+    /CODEX_WEBUI_BROWSE_ROOT must not be empty/,
+  );
+  assert.throws(
     () => canonicalizeBrowseRoot(path.join(item.temporaryRoot, "missing")),
     /CODEX_WEBUI_BROWSE_ROOT does not exist/,
   );
@@ -114,6 +120,38 @@ test("parses the exact default and only positive decimal safe upload quotas", ()
       invalid,
     );
   }
+});
+
+test("parses the allow-any-project opt-in without weakening the default", () => {
+  assert.equal(parseAllowAnyProject(undefined), false);
+  assert.equal(parseAllowAnyProject("false"), false);
+  assert.equal(parseAllowAnyProject("true"), true);
+
+  for (const invalid of ["", "0", "1", "TRUE", "yes", " true "]) {
+    assert.throws(
+      () => parseAllowAnyProject(invalid),
+      /CODEX_WEBUI_ALLOW_ANY_PROJECT must be true or false/,
+      invalid,
+    );
+  }
+});
+
+test("selects the filesystem root only for the explicit allow-any opt-in", () => {
+  const homeDirectory = path.join(path.parse(process.cwd()).root, "home", "user");
+  const configuredRoot = path.join(homeDirectory, "projects");
+
+  assert.equal(
+    resolveConfiguredBrowseRoot(configuredRoot, homeDirectory, false),
+    configuredRoot,
+  );
+  assert.equal(
+    resolveConfiguredBrowseRoot(undefined, homeDirectory, false),
+    homeDirectory,
+  );
+  assert.equal(
+    resolveConfiguredBrowseRoot(configuredRoot, homeDirectory, true),
+    path.parse(path.resolve(homeDirectory)).root,
+  );
 });
 
 test("picker consumes the pinned directory authority and preserves bounded ordering", async (t) => {
@@ -185,6 +223,46 @@ test("picker consumes the pinned directory authority and preserves bounded order
       ),
     /must not contain symlinks/,
   );
+  assert.throws(
+    () => resolveBoundedDirectory("invalid\0path", item.browseRoot),
+    /is invalid/,
+  );
+  assert.throws(
+    () =>
+      resolveBoundedDirectory(
+        `${item.browseRoot}${path.sep}..`,
+        item.browseRoot,
+      ),
+    /must not contain '\.\.'/,
+  );
+  assert.throws(
+    () => resolveBoundedDirectory(item.outsideRoot, item.browseRoot),
+    /outside CODEX_WEBUI_BROWSE_ROOT/,
+  );
+});
+
+test("filesystem-root authority can browse and open an outside project", async (t) => {
+  const item = await fixture();
+  const filesystemRoot = path.parse(path.resolve(item.temporaryRoot)).root;
+  const authority = await WorkspaceFileAuthority.create(
+    filesystemRoot,
+    item.temporaryRoot,
+  );
+  t.after(async () => {
+    await authority.cleanup();
+    await fsp.rm(item.temporaryRoot, { recursive: true, force: true });
+  });
+
+  const entries = await authority.getWorkspaceDirectoryEntries(
+    item.outsideRoot,
+    true,
+  );
+  assert.equal(entries.directoryPath, item.outsideRoot);
+
+  const opened = await authority.openAllowedFile(
+    path.join(item.outsideRoot, "secret.txt"),
+  );
+  assert.equal((await readStream(opened.stream)).toString(), "outside");
 });
 
 test("browse and picker operations stay rooted in the lifetime-pinned inode", async (t) => {

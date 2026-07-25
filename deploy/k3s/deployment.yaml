@@ -80,6 +80,8 @@ spec:
               value: /home/codex-web/.codex
             - name: CODEX_WEBUI_BROWSE_ROOT
               value: /workspace
+            - name: CODEX_WEBUI_ALLOW_ANY_PROJECT
+              value: "false"
           ports:
             - name: http
               containerPort: 8214

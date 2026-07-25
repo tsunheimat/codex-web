@@ -48,6 +48,7 @@ ENV NODE_ENV=production \
     HOME=/home/codex-web \
     CODEX_HOME=/home/codex-web/.codex \
     CODEX_WEBUI_BROWSE_ROOT=/workspace \
+    CODEX_WEBUI_ALLOW_ANY_PROJECT=false \
     CODEX_CLI_PATH=/usr/local/bin/codex \
     npm_config_update_notifier=false
 

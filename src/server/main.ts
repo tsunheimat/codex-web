@@ -39,7 +39,9 @@ import {
 } from "./renderer-recovery";
 import { registerWorkspaceFileRoutes } from "./workspace-file-routes";
 import {
+  parseAllowAnyProject,
   parseUploadQuotaBytes,
+  resolveConfiguredBrowseRoot,
   WorkspaceFileAuthority,
   type WorkspaceDirectoryEntries,
 } from "./workspace-files";
@@ -462,8 +464,14 @@ function createServerCleanupAuthority({
 }
 
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
-  const configuredBrowseRoot =
-    process.env.CODEX_WEBUI_BROWSE_ROOT?.trim() || os.homedir();
+  const allowAnyProject = parseAllowAnyProject(
+    process.env.CODEX_WEBUI_ALLOW_ANY_PROJECT,
+  );
+  const configuredBrowseRoot = resolveConfiguredBrowseRoot(
+    process.env.CODEX_WEBUI_BROWSE_ROOT,
+    os.homedir(),
+    allowAnyProject,
+  );
   const uploadQuotaBytes = parseUploadQuotaBytes(
     process.env.CODEX_WEBUI_UPLOAD_QUOTA_BYTES,
   );
@@ -845,12 +853,17 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   );
   console.log(`IPC bridge listening at ws://${options.host}:${options.port}`);
   console.log(`Workspace browse root: ${workspaceFileAuthority.browseRoot}`);
+  if (allowAnyProject) {
+    console.warn(
+      "WARNING: CODEX_WEBUI_ALLOW_ANY_PROJECT exposes every filesystem path visible to this server",
+    );
+  }
 
   await startupStep(async () => {
     ensureElectronLikeProcessContext();
     installModuleAliasHook();
 
-    if (process.env.CODEX_WEBUI_BROWSE_ROOT?.trim()) {
+    if (allowAnyProject || process.env.CODEX_WEBUI_BROWSE_ROOT?.trim()) {
       // The desktop bundle (shell-projectless-browse-root.patch) and child
       // processes read this env value directly. A relative or symlinked
       // configured root would diverge from the canonical root the request

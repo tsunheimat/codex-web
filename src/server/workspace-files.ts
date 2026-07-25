@@ -110,6 +110,27 @@ function fileSystemErrorCode(error: unknown): string | null {
   return null;
 }
 
+export function parseAllowAnyProject(rawValue: string | undefined): boolean {
+  if (rawValue === undefined || rawValue === "false") {
+    return false;
+  }
+  if (rawValue === "true") {
+    return true;
+  }
+  throw new Error("CODEX_WEBUI_ALLOW_ANY_PROJECT must be true or false");
+}
+
+export function resolveConfiguredBrowseRoot(
+  configuredRoot: string | undefined,
+  homeDirectory: string,
+  allowAnyProject: boolean,
+): string {
+  if (allowAnyProject) {
+    return path.parse(path.resolve(homeDirectory)).root;
+  }
+  return configuredRoot?.trim() || homeDirectory;
+}
+
 /** Resolve and validate the configured authority root before the server starts. */
 export function canonicalizeBrowseRoot(configuredRoot: string): string {
   const requestedRoot = configuredRoot.trim();

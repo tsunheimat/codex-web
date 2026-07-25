@@ -352,6 +352,51 @@ test("invalid upload quotas fail before listen without runtime residue", async (
   }
 });
 
+test("invalid allow-any-project values fail before listen", async (t) => {
+  for (const value of ["", "0", "1", "TRUE", "yes", " true "]) {
+    await t.test(JSON.stringify(value), async (t) => {
+      const port = await unusedLoopbackPort();
+      const run = await createIsolatedRun(t, {
+        codexCliPath: hangingCodexCli,
+        environment: { CODEX_WEBUI_ALLOW_ANY_PROJECT: value },
+        port,
+      });
+      const result = await waitForExit(run);
+      assert.notEqual(result.code, 0, childOutput(run));
+      assert.match(
+        childOutput(run),
+        /CODEX_WEBUI_ALLOW_ANY_PROJECT must be true or false/,
+      );
+      assert.equal(childOutput(run).includes("IPC bridge listening at"), false);
+      await assertRunClean(run);
+    });
+  }
+});
+
+test("allow-any-project starts with the filesystem root authority", async (t) => {
+  const port = await unusedLoopbackPort();
+  const run = await createIsolatedRun(t, {
+    codexCliPath: hangingCodexCli,
+    environment: { CODEX_WEBUI_ALLOW_ANY_PROJECT: "true" },
+    port,
+  });
+
+  await waitFor("allow-any bridge listener", () =>
+    childOutput(run).includes("IPC bridge listening at"),
+  );
+  const filesystemRoot = path.parse(path.resolve(os.homedir())).root;
+  assert.equal(
+    childOutput(run).includes(`Workspace browse root: ${filesystemRoot}`),
+    true,
+    childOutput(run),
+  );
+
+  run.child.kill("SIGTERM");
+  const result = await waitForExit(run);
+  assert.equal(result.code, 0, childOutput(run));
+  await assertRunClean(run);
+});
+
 test("synchronous listen failure cleans the created runtime and remains nonzero", async (t) => {
   const occupied = await listenOnLoopback();
   t.after(

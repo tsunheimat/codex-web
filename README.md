@@ -88,6 +88,20 @@ through symlinks are rejected. Picker listings and Web-owned file responses are
 consumed through authorized open descriptors, so replacing a pathname after it
 has been opened does not redirect the operation.
 
+To let Browser users select any project visible to the server, explicitly set:
+
+```bash
+CODEX_WEBUI_ALLOW_ANY_PROJECT=true codex-web
+```
+
+This overrides `CODEX_WEBUI_BROWSE_ROOT` and uses the filesystem root as the
+browse authority. Only the exact values `true` and `false` are accepted, and the
+default is `false`. Enabling it exposes every server-visible path through the
+project picker, file previews/downloads, and workspace runtime roots. Use it
+only for a trusted deployment. In Docker, host paths that are not bind-mounted
+remain invisible; set `CODEX_WEB_WORKSPACE_DIR` to a suitable common parent or
+add the required mounts.
+
 Uploaded attachments are kept in a disposable per-process directory. Their
 aggregate retained and in-flight storage defaults to exactly 512 MiB. Set a
 different process-wide byte budget with a positive decimal safe integer:
