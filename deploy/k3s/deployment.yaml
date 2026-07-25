@@ -33,48 +33,16 @@ spec:
           image: ghcr.io/tsunheimat/codex-web:latest
           imagePullPolicy: IfNotPresent
           command:
-            - /bin/sh
-            - -ceu
-          args:
-            - |
-              config_src=/bootstrap-config/config.toml
-              auth_src=/bootstrap-auth/auth.json
-              codex_home=/home/codex-web/.codex
-
-              if [ ! -s "$config_src" ]; then
-                echo "missing or empty $config_src" >&2
-                exit 1
-              fi
-
-              if [ ! -s "$auth_src" ]; then
-                echo "missing or empty $auth_src" >&2
-                exit 1
-              fi
-
-              umask 077
-              mkdir -p "$codex_home"
-
-              config_tmp=
-              auth_tmp=
-              cleanup() {
-                if [ -n "$config_tmp" ]; then
-                  rm -f "$config_tmp"
-                fi
-                if [ -n "$auth_tmp" ]; then
-                  rm -f "$auth_tmp"
-                fi
-              }
-              trap cleanup EXIT HUP INT TERM
-              config_tmp="$(mktemp "$codex_home/.config.toml.tmp.XXXXXX")"
-              auth_tmp="$(mktemp "$codex_home/.auth.json.tmp.XXXXXX")"
-
-              cp "$config_src" "$config_tmp"
-              cp "$auth_src" "$auth_tmp"
-              chmod 0600 "$config_tmp" "$auth_tmp"
-              mv -f "$config_tmp" "$codex_home/config.toml"
-              mv -f "$auth_tmp" "$codex_home/auth.json"
-
-              trap - EXIT HUP INT TERM
+            - /usr/local/bin/codex-web-init.sh
+          env:
+            - name: CODEX_HOME
+              value: /home/codex-web/.codex
+            - name: CODEX_CONFIG_SOURCE
+              value: /bootstrap-config/config.toml
+            - name: CODEX_AUTH_SOURCE
+              value: /bootstrap-auth/auth.json
+            - name: CODEX_BOOTSTRAP_FORCE_COPY
+              value: "false"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

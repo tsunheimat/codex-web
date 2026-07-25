@@ -188,6 +188,15 @@ ordered single-replica StatefulSet replacement. Do not use overlapping
 `RollingUpdate` Pods with the same `CODEX_HOME` or workspace volume. This is an
 operational lifecycle boundary, not a live deployment manifest.
 
+The Kubernetes deployment bootstraps `config.toml` and `auth.json` from its
+operator-owned ConfigMap and Secret through `/usr/local/bin/codex-web-init.sh`.
+By default, `CODEX_BOOTSTRAP_FORCE_COPY=false`, so existing files in the
+persistent `CODEX_HOME` are preserved and only missing files are copied. Set
+that environment variable to `true` in a deployment overlay to atomically
+replace both files on Pod start. The source files must be non-empty, and the
+resulting files are written with mode `0600`; changing the ConfigMap or Secret
+does not affect a running Pod until it is restarted.
+
 This controlled lifecycle does not promise active-turn migration, forced-crash
 continuation, pre-accept exactly-once behavior, zero downtime, or raw bridge
 persistence. Authentication and HTTPS remain the responsibility of the trusted

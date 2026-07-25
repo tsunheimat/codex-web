@@ -69,6 +69,9 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/src/server ./src/server
 COPY --from=build /app/scratch/asar ./scratch/asar
+COPY container-init.sh /usr/local/bin/codex-web-init.sh
+
+RUN chmod 0555 /usr/local/bin/codex-web-init.sh
 
 EXPOSE 8214
 
