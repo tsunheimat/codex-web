@@ -13,6 +13,7 @@ const {
   parseAllowAnyProject,
   parseUploadQuotaBytes,
   resolveConfiguredBrowseRoot,
+  resolveProjectBrowseRoot,
   resolveBoundedDirectory,
   safeDownloadName,
   WorkspaceFileAuthority,
@@ -136,20 +137,28 @@ test("parses the allow-any-project opt-in without weakening the default", () => 
   }
 });
 
-test("selects the filesystem root only for the explicit allow-any opt-in", () => {
+test("keeps the configured browse root separate from the allow-any project root", () => {
   const homeDirectory = path.join(path.parse(process.cwd()).root, "home", "user");
   const configuredRoot = path.join(homeDirectory, "projects");
 
   assert.equal(
-    resolveConfiguredBrowseRoot(configuredRoot, homeDirectory, false),
+    resolveConfiguredBrowseRoot(configuredRoot, homeDirectory),
     configuredRoot,
   );
   assert.equal(
-    resolveConfiguredBrowseRoot(undefined, homeDirectory, false),
+    resolveConfiguredBrowseRoot(undefined, homeDirectory),
     homeDirectory,
   );
   assert.equal(
-    resolveConfiguredBrowseRoot(configuredRoot, homeDirectory, true),
+    resolveConfiguredBrowseRoot(configuredRoot, homeDirectory),
+    configuredRoot,
+  );
+  assert.equal(
+    resolveProjectBrowseRoot(configuredRoot, homeDirectory, false),
+    configuredRoot,
+  );
+  assert.equal(
+    resolveProjectBrowseRoot(configuredRoot, homeDirectory, true),
     path.parse(path.resolve(homeDirectory)).root,
   );
 });
@@ -263,6 +272,38 @@ test("filesystem-root authority can browse and open an outside project", async (
     path.join(item.outsideRoot, "secret.txt"),
   );
   assert.equal((await readStream(opened.stream)).toString(), "outside");
+});
+
+test("project picker can use a separate filesystem-root authority", async (t) => {
+  const item = await fixture();
+  const filesystemRoot = path.parse(path.resolve(item.temporaryRoot)).root;
+  const authority = await WorkspaceFileAuthority.create(
+    item.browseRoot,
+    item.temporaryRoot,
+    DEFAULT_UPLOAD_QUOTA_BYTES,
+    filesystemRoot,
+  );
+  t.after(async () => {
+    await authority.cleanup();
+    await fsp.rm(item.temporaryRoot, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    authority.getWorkspaceDirectoryEntries(item.outsideRoot, true),
+    /outside CODEX_WEBUI_BROWSE_ROOT/,
+  );
+  await assert.rejects(
+    authority.openAllowedFile(path.join(item.outsideRoot, "secret.txt")),
+    /outside the allowed workspace and upload roots/,
+  );
+  const entries = await authority.getWorkspaceDirectoryEntries(
+    item.outsideRoot,
+    true,
+    "project",
+  );
+  assert.equal(entries.directoryPath, item.outsideRoot);
+  assert.equal(authority.browseRoot, item.browseRoot);
+  assert.equal(authority.projectBrowseRoot, filesystemRoot);
 });
 
 test("browse and picker operations stay rooted in the lifetime-pinned inode", async (t) => {

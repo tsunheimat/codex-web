@@ -58,6 +58,7 @@ type RendererToMainMessage =
       requestId: string;
       directoryPath: string | null;
       directoriesOnly: boolean;
+      scope?: "browse" | "project";
     };
 
 type MainToRendererMessage =
@@ -776,6 +777,7 @@ function isElectronWindowFocusRequestMessage(value: unknown): value is {
 
 function requestWorkspaceDirectoryEntries(
   directoryPath: string | null,
+  scope: "browse" | "project" = "browse",
 ): Promise<WorkspaceDirectoryEntries> {
   const requestId = nextRequestId();
   return new Promise((resolve, reject) => {
@@ -785,6 +787,7 @@ function requestWorkspaceDirectoryEntries(
       requestId,
       directoryPath,
       directoriesOnly: true,
+      scope,
     });
   });
 }
@@ -937,7 +940,8 @@ export const ipcRenderer = {
 
       if (isUnhandledAddWorkspaceRootOptionMessage(args[0])) {
         return openSelectWorkspaceRootDialog({
-          listDirectory: requestWorkspaceDirectoryEntries,
+          listDirectory: (directoryPath) =>
+            requestWorkspaceDirectoryEntries(directoryPath, "project"),
         }).then((root) => {
           if (!root) {
             return undefined;

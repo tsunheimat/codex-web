@@ -34,6 +34,8 @@ export type WorkspaceDirectoryEntries = {
   entries: WorkspaceDirectoryEntry[];
 };
 
+export type WorkspaceDirectoryScope = "browse" | "project";
+
 export type StoredWorkspaceUpload = {
   label: string;
   path: string;
@@ -123,12 +125,19 @@ export function parseAllowAnyProject(rawValue: string | undefined): boolean {
 export function resolveConfiguredBrowseRoot(
   configuredRoot: string | undefined,
   homeDirectory: string,
+): string {
+  return configuredRoot?.trim() || homeDirectory;
+}
+
+export function resolveProjectBrowseRoot(
+  configuredRoot: string | undefined,
+  homeDirectory: string,
   allowAnyProject: boolean,
 ): string {
   if (allowAnyProject) {
     return path.parse(path.resolve(homeDirectory)).root;
   }
-  return configuredRoot?.trim() || homeDirectory;
+  return resolveConfiguredBrowseRoot(configuredRoot, homeDirectory);
 }
 
 /** Resolve and validate the configured authority root before the server starts. */
@@ -462,11 +471,13 @@ async function closeHandle(handle: FileHandle | null): Promise<void> {
 
 export class WorkspaceFileAuthority {
   readonly browseRoot: string;
+  readonly projectBrowseRoot: string;
   readonly runtimeRoot: string;
   readonly uploadRoot: string;
   readonly uploadQuotaBytes: number;
 
   private readonly browseRootHandle: FileHandle;
+  private readonly projectBrowseRootHandle: FileHandle | null;
   private readonly uploadRootHandle: FileHandle;
   private readonly uploadedFiles = new Map<string, UploadRecord>();
   private readonly activeUploadDiscards = new Map<string, Promise<void>>();
@@ -481,17 +492,21 @@ export class WorkspaceFileAuthority {
 
   private constructor(
     browseRoot: string,
+    projectBrowseRoot: string,
     runtimeRoot: string,
     uploadRoot: string,
     uploadQuotaBytes: number,
     browseRootHandle: FileHandle,
+    projectBrowseRootHandle: FileHandle | null,
     uploadRootHandle: FileHandle,
   ) {
     this.browseRoot = browseRoot;
+    this.projectBrowseRoot = projectBrowseRoot;
     this.runtimeRoot = runtimeRoot;
     this.uploadRoot = uploadRoot;
     this.uploadQuotaBytes = uploadQuotaBytes;
     this.browseRootHandle = browseRootHandle;
+    this.projectBrowseRootHandle = projectBrowseRootHandle;
     this.uploadRootHandle = uploadRootHandle;
   }
 
@@ -499,12 +514,17 @@ export class WorkspaceFileAuthority {
     configuredRoot: string,
     temporaryParent = os.tmpdir(),
     uploadQuotaBytes = DEFAULT_UPLOAD_QUOTA_BYTES,
+    configuredProjectBrowseRoot?: string,
   ): Promise<WorkspaceFileAuthority> {
     if (!Number.isSafeInteger(uploadQuotaBytes) || uploadQuotaBytes <= 0) {
       throw new Error("Upload quota must be a positive safe integer");
     }
     const browseRoot = canonicalizeBrowseRoot(configuredRoot);
+    const projectBrowseRoot = canonicalizeBrowseRoot(
+      configuredProjectBrowseRoot ?? browseRoot,
+    );
     let browseRootHandle: FileHandle | null = null;
+    let projectBrowseRootHandle: FileHandle | null = null;
     let uploadRootHandle: FileHandle | null = null;
     let runtimeRoot: string | null = null;
     try {
@@ -521,6 +541,27 @@ export class WorkspaceFileAuthority {
         expectedBrowseRootStat,
         browseRootChangedMessage,
       );
+
+      if (projectBrowseRoot !== browseRoot) {
+        const projectBrowseRootChangedMessage =
+          "Project browse root changed while its authority was pinned";
+        const expectedProjectBrowseRootStat = await captureDirectoryIdentity(
+          projectBrowseRoot,
+          projectBrowseRootChangedMessage,
+        );
+        projectBrowseRootHandle = await fs.open(
+          projectBrowseRoot,
+          PINNED_ROOT_OPEN_FLAGS,
+        );
+        const projectBrowseStat = await projectBrowseRootHandle.stat({
+          bigint: true,
+        });
+        validatePinnedDirectoryIdentity(
+          projectBrowseStat,
+          expectedProjectBrowseRootStat,
+          projectBrowseRootChangedMessage,
+        );
+      }
 
       runtimeRoot = await fs.mkdtemp(
         path.join(temporaryParent, "codex-web-runtime-"),
@@ -543,15 +584,18 @@ export class WorkspaceFileAuthority {
 
       return new WorkspaceFileAuthority(
         browseRoot,
+        projectBrowseRoot,
         runtimeRoot,
         uploadRoot,
         uploadQuotaBytes,
         browseRootHandle,
+        projectBrowseRootHandle,
         uploadRootHandle,
       );
     } catch (error) {
       await Promise.allSettled([
         closeHandle(uploadRootHandle),
+        closeHandle(projectBrowseRootHandle),
         closeHandle(browseRootHandle),
       ]);
       if (runtimeRoot) {
@@ -577,7 +621,8 @@ export class WorkspaceFileAuthority {
     uploadOperations: number;
   } {
     return {
-      rootDescriptors: this.cleanedUp ? 0 : 2,
+      rootDescriptors:
+        this.cleanedUp ? 0 : 2 + Number(this.projectBrowseRootHandle !== null),
       readDescriptors: this.activeReadStreams.size,
       uploadOperations: this.activeUploads.size,
     };
@@ -633,18 +678,55 @@ export class WorkspaceFileAuthority {
     );
   }
 
+  private classifyDirectoryPath(
+    input: string,
+    authorityRoot: string,
+    outsideMessage = "Workspace directory is outside CODEX_WEBUI_BROWSE_ROOT",
+  ): { requestedPath: string; relativePath: string } {
+    if (!input || input.includes("\0") || !path.isAbsolute(input)) {
+      throw new WorkspacePathError("File path must be absolute");
+    }
+    if (hasTraversalSegment(input)) {
+      throw new WorkspacePathError("File path must not contain '..'", 403);
+    }
+
+    const requestedPath = path.resolve(input);
+    if (!isPathInside(requestedPath, authorityRoot)) {
+      throw new WorkspacePathError(outsideMessage, 403);
+    }
+    return {
+      requestedPath,
+      relativePath: path.relative(authorityRoot, requestedPath),
+    };
+  }
+
   async getWorkspaceDirectoryEntries(
     directoryPath: string | null,
     directoriesOnly: boolean,
+    scope: WorkspaceDirectoryScope = "browse",
   ): Promise<WorkspaceDirectoryEntries> {
     this.assertActive();
-    const requested = directoryPath?.trim() || this.browseRoot;
-    const classified = this.classifyPath(requested, false);
+    const useProjectBrowseRoot =
+      scope === "project" && this.projectBrowseRootHandle !== null;
+    const authorityRoot = useProjectBrowseRoot
+      ? this.projectBrowseRoot
+      : this.browseRoot;
+    const authorityRootHandle = useProjectBrowseRoot
+      ? this.projectBrowseRootHandle!
+      : this.browseRootHandle;
+    const requested = directoryPath?.trim() || authorityRoot;
+    const classified = this.classifyDirectoryPath(
+      requested,
+      authorityRoot,
+      useProjectBrowseRoot
+        ? "Workspace directory is outside the project browse root"
+        : undefined,
+    );
     const finishOperation = this.beginAuthorityOperation();
     let opened: OpenedWorkspacePath | null = null;
     try {
       opened = await openWorkspacePathWithinRoot(
-        this.browseRootHandle,
+        authorityRootHandle,
         classified.relativePath,
         "Workspace directory",
         "directory",
@@ -677,8 +759,8 @@ export class WorkspaceFileAuthority {
 
       const parentCandidate = path.dirname(classified.requestedPath);
       const parentPath =
-        classified.requestedPath === this.browseRoot ||
-        !isPathInside(parentCandidate, this.browseRoot)
+        classified.requestedPath === authorityRoot ||
+        !isPathInside(parentCandidate, authorityRoot)
           ? null
           : parentCandidate;
       return {
@@ -1016,7 +1098,14 @@ export class WorkspaceFileAuthority {
       } catch (error) {
         errors.push(error);
       }
-      for (const handle of [this.uploadRootHandle, this.browseRootHandle]) {
+      for (const handle of [
+        this.uploadRootHandle,
+        this.projectBrowseRootHandle,
+        this.browseRootHandle,
+      ]) {
+        if (!handle) {
+          continue;
+        }
         try {
           await handle.close();
         } catch (error) {

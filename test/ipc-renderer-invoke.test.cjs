@@ -89,6 +89,33 @@ test("absolute and tilde cwd values are canonicalized before IPC forwarding", as
   );
 });
 
+test("project browse authority permits a selected project outside the file browse root", async (t) => {
+  const temporaryRoot = await fsp.mkdtemp(
+    path.join(os.tmpdir(), "codex-web-ipc-project-root-"),
+  );
+  const browseRoot = path.join(temporaryRoot, "workspace");
+  const projectRoot = path.join(temporaryRoot, "project");
+  await Promise.all([fsp.mkdir(browseRoot), fsp.mkdir(projectRoot)]);
+  t.after(() => fsp.rm(temporaryRoot, { recursive: true, force: true }));
+
+  const forwarded = [];
+  const handler = async (_channel, args) => {
+    forwarded.push(structuredClone(args));
+    return "accepted";
+  };
+  assert.equal(
+    await invokeRendererRequest(
+      rendererInvoke("mcp-request", "thread/start", projectRoot),
+      browseRoot,
+      handler,
+      temporaryRoot,
+      projectRoot,
+    ),
+    "accepted",
+  );
+  assert.equal(forwarded[0][0].request.params.cwd, projectRoot);
+});
+
 test("a workspace-path rejection produces a renderer-visible mcp-response error", async (t) => {
   const {
     syntheticMcpErrorEventForRejectedInvoke,

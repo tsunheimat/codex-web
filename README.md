@@ -73,10 +73,10 @@ docker compose run --rm codex-web codex login --device-auth
 ### workspace file boundary
 
 The project picker, workspace file previews/downloads, and workspace-related
-runtime roots are restricted to `CODEX_WEBUI_BROWSE_ROOT`. It defaults to the
-server user's home directory. Set it to the directory that should be available
-to Browser users before starting the server; container deployments can use
-`/workspace` without changing source code:
+runtime roots are restricted to `CODEX_WEBUI_BROWSE_ROOT` by default. It
+defaults to the server user's home directory. Set it to the directory that
+should be available to Browser users before starting the server; container
+deployments can use `/workspace` without changing source code:
 
 ```bash
 CODEX_WEBUI_BROWSE_ROOT=/workspace codex-web
@@ -88,19 +88,21 @@ through symlinks are rejected. Picker listings and Web-owned file responses are
 consumed through authorized open descriptors, so replacing a pathname after it
 has been opened does not redirect the operation.
 
-To let Browser users select any project visible to the server, explicitly set:
+To let Browser users select any project visible to the server from the Create
+project flow, explicitly set:
 
 ```bash
 CODEX_WEBUI_ALLOW_ANY_PROJECT=true codex-web
 ```
 
-This overrides `CODEX_WEBUI_BROWSE_ROOT` and uses the filesystem root as the
-browse authority. Only the exact values `true` and `false` are accepted, and the
-default is `false`. Enabling it exposes every server-visible path through the
-project picker, file previews/downloads, and workspace runtime roots. Use it
-only for a trusted deployment. In Docker, host paths that are not bind-mounted
-remain invisible; set `CODEX_WEB_WORKSPACE_DIR` to a suitable common parent or
-add the required mounts.
+This does not override `CODEX_WEBUI_BROWSE_ROOT`: file previews/downloads and
+the normal workspace boundary remain restricted to that root. It gives only the
+Create project folder picker and the resulting project thread roots a
+filesystem-root authority. Only the exact values `true` and `false` are
+accepted, and the default is `false`. Use it only for a trusted deployment. In
+Docker, host paths that are not bind-mounted remain invisible; set
+`CODEX_WEB_WORKSPACE_DIR` to a suitable common parent or add the required
+mounts.
 
 Uploaded attachments are kept in a disposable per-process directory. Their
 aggregate retained and in-flight storage defaults to exactly 512 MiB. Set a

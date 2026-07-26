@@ -34,11 +34,12 @@ export async function invokeRendererRequest(
   browseRoot: string,
   handler: RendererInvokeHandler,
   homeDir = os.homedir(),
+  projectBrowseRoot = browseRoot,
 ): Promise<unknown> {
   const result = sanitizeRendererInvokeMcpRequestPaths(
     message,
     homeDir,
-    browseRoot,
+    projectBrowseRoot,
   );
   if (result) {
     for (const change of result.changes) {

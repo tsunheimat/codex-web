@@ -243,7 +243,7 @@ async function createIsolatedRun(t, { codexCliPath, environment = {}, port }) {
     }),
   );
 
-  return { ...run, port, runId, temporaryDirectory };
+  return { ...run, browseRoot, port, runId, temporaryDirectory };
 }
 
 async function assertRunClean(run) {
@@ -373,7 +373,7 @@ test("invalid allow-any-project values fail before listen", async (t) => {
   }
 });
 
-test("allow-any-project starts with the filesystem root authority", async (t) => {
+test("allow-any-project preserves the configured browse-root authority", async (t) => {
   const port = await unusedLoopbackPort();
   const run = await createIsolatedRun(t, {
     codexCliPath: hangingCodexCli,
@@ -384,9 +384,11 @@ test("allow-any-project starts with the filesystem root authority", async (t) =>
   await waitFor("allow-any bridge listener", () =>
     childOutput(run).includes("IPC bridge listening at"),
   );
-  const filesystemRoot = path.parse(path.resolve(os.homedir())).root;
+  await waitFor("allow-any browse-root log", () =>
+    childOutput(run).includes(`Workspace browse root: ${run.browseRoot}`),
+  );
   assert.equal(
-    childOutput(run).includes(`Workspace browse root: ${filesystemRoot}`),
+    childOutput(run).includes(`Workspace browse root: ${run.browseRoot}`),
     true,
     childOutput(run),
   );

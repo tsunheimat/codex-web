@@ -42,6 +42,7 @@ import {
   parseAllowAnyProject,
   parseUploadQuotaBytes,
   resolveConfiguredBrowseRoot,
+  resolveProjectBrowseRoot,
   WorkspaceFileAuthority,
   type WorkspaceDirectoryEntries,
 } from "./workspace-files";
@@ -84,6 +85,7 @@ type RendererToMainMessage =
       requestId: string;
       directoryPath: string | null;
       directoriesOnly: boolean;
+      scope?: "browse" | "project";
     };
 
 type MainToRendererMessage =
@@ -470,6 +472,10 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const configuredBrowseRoot = resolveConfiguredBrowseRoot(
     process.env.CODEX_WEBUI_BROWSE_ROOT,
     os.homedir(),
+  );
+  const projectBrowseRoot = resolveProjectBrowseRoot(
+    process.env.CODEX_WEBUI_BROWSE_ROOT,
+    os.homedir(),
     allowAnyProject,
   );
   const uploadQuotaBytes = parseUploadQuotaBytes(
@@ -479,6 +485,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     configuredBrowseRoot,
     os.tmpdir(),
     uploadQuotaBytes,
+    projectBrowseRoot,
   );
   const ownsAppServerRuntime = !process.env.CODEX_UNIX_SOCKET?.trim();
   const bridgeState = getIpcMainBridgeState();
@@ -783,6 +790,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
         .getWorkspaceDirectoryEntries(
           message.directoryPath,
           message.directoriesOnly,
+          message.scope,
         )
         .then((result) => {
           session.send({
@@ -820,6 +828,8 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
                     `[ipc-bridge] no ipcMain.handle for channel ${sanitizedChannel}`,
                   ),
                 )),
+            os.homedir(),
+            workspaceFileAuthority.projectBrowseRoot,
           ),
         )
         .then((result) => {
@@ -855,7 +865,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   console.log(`Workspace browse root: ${workspaceFileAuthority.browseRoot}`);
   if (allowAnyProject) {
     console.warn(
-      "WARNING: CODEX_WEBUI_ALLOW_ANY_PROJECT exposes every filesystem path visible to this server",
+      "WARNING: CODEX_WEBUI_ALLOW_ANY_PROJECT lets Create project select any filesystem path visible to this server",
     );
   }
 
@@ -863,7 +873,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     ensureElectronLikeProcessContext();
     installModuleAliasHook();
 
-    if (allowAnyProject || process.env.CODEX_WEBUI_BROWSE_ROOT?.trim()) {
+    if (process.env.CODEX_WEBUI_BROWSE_ROOT?.trim()) {
       // The desktop bundle (shell-projectless-browse-root.patch) and child
       // processes read this env value directly. A relative or symlinked
       // configured root would diverge from the canonical root the request
