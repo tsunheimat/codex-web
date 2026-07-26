@@ -1,20 +1,20 @@
---- a/webview/assets/app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js
-+++ b/webview/assets/app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js
-@@ -41684,7 +41684,7 @@
+--- a/webview/assets/app-initial-BTphDPeq.js
++++ b/webview/assets/app-initial-BTphDPeq.js
+@@ -236473,7 +236473,7 @@
        );
    return (
-     a.forEach((n) => {
--      if (l ? t.has(n.model) : !n.hidden) {
-+      if (!n.hidden) {
-         let t = i
-             ? n.supportedReasoningEfforts
-             : n.supportedReasoningEfforts.filter(
-@@ -41958,13 +41958,13 @@
+     o.forEach((r) => {
+-      if (e?.has(r.model) === !0 || (u ? n.has(r.model) : !r.hidden)) {
++      if (e?.has(r.model) === !0 || !r.hidden) {
+         let e = a
+             ? r.supportedReasoningEfforts
+             : r.supportedReasoningEfforts.filter(
+@@ -236704,13 +236704,13 @@
    userSavedReasoningEffort: t,
    listModelsData: n,
  }) {
--  let r = e ? Dv(n?.models, e) : (n?.defaultModel ?? Dv(n?.models, `gpt-5.5`)),
-+  let r = e ? Dv(n?.models, e) : (n?.defaultModel ?? n?.models[0] ?? null),
+-  let r = e ? GM(n?.models, e) : (n?.defaultModel ?? GM(n?.models, `gpt-5.5`)),
++  let r = e ? GM(n?.models, e) : (n?.defaultModel ?? n?.models[0] ?? null),
      i = r?.supportedReasoningEfforts?.map((e) => e.reasoningEffort),
      a = t != null && i != null && i.includes(t) ? t : r?.defaultReasoningEffort;
    return {
