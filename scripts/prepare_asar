@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
+# Prettier's AST for the minified Desktop bundle exceeds V8's default heap.
+PRETTIER_MAX_OLD_SPACE_SIZE="${PRETTIER_MAX_OLD_SPACE_SIZE:-6144}"
+if [[ ! "$PRETTIER_MAX_OLD_SPACE_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PRETTIER_MAX_OLD_SPACE_SIZE must be a positive integer" >&2
+  exit 2
+fi
+
+prettier_with_memory() {
+  local prettier_node_options="${NODE_OPTIONS:-}"
+  if [[
+    "$prettier_node_options" != *"--max-old-space-size="* &&
+    "$prettier_node_options" != *"--max-old-space-size "*
+  ]]; then
+    prettier_node_options="${prettier_node_options:+$prettier_node_options }--max-old-space-size=${PRETTIER_MAX_OLD_SPACE_SIZE}"
+  fi
+  NODE_OPTIONS="$prettier_node_options" prettier "$@"
+}
+
 unzip -o "$HOSTED_CODEX_APP_ZIP" -d scratch/
 asar extract "scratch/ChatGPT.app/Contents/Resources/app.asar" "scratch/asar"
 cp assets/* scratch/asar/webview/
@@ -13,8 +31,9 @@ PWA_PADDING_TOTAL=$((PWA_ICON_SIZE - PWA_CONTENT_SIZE))
 PWA_PADDING_BEFORE=$((PWA_PADDING_TOTAL / 2))
 PWA_PADDING_AFTER=$((PWA_PADDING_TOTAL - PWA_PADDING_BEFORE))
 sharp -i "$PWA_SOURCE_ICON" -o "$PWA_TARGET_ICON" -f png resize "$PWA_CONTENT_SIZE" "$PWA_CONTENT_SIZE" --fit inside -- flatten white -- extend "$PWA_PADDING_BEFORE" "$PWA_PADDING_AFTER" "$PWA_PADDING_BEFORE" "$PWA_PADDING_AFTER" --background white -- removeAlpha
+
 if [[ -n "${DEV:-}" ]]; then
-  prettier --ignore-path /dev/null --ignore-unknown --write "scratch/asar"
+  prettier_with_memory --ignore-path /dev/null --ignore-unknown --write "scratch/asar"
 else
   patched_files=()
   while IFS= read -r patched_file; do
@@ -22,7 +41,7 @@ else
   done < <(
     awk '/^\+\+\+ b\//{sub(/^\+\+\+ b\//, "scratch/asar/"); print}' patches/*.patch | sort -u
   )
-  prettier --ignore-path /dev/null --ignore-unknown --write "${patched_files[@]}"
+  prettier_with_memory --ignore-path /dev/null --ignore-unknown --write "${patched_files[@]}"
 fi
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-remove-csp.patch
 patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-style.patch

@@ -46,6 +46,7 @@ jobs:
             test/electron-app-lifecycle.test.cjs \
             test/ipc-renderer-invoke.test.cjs \
             test/path-sanitizer.test.cjs \
+            test/prepare-asar-config.test.cjs \
             test/reliable-bridge.test.cjs \
             test/renderer-recovery.test.cjs \
             test/restart-recovery-marker.test.cjs \
