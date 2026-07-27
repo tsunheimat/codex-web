@@ -83,6 +83,111 @@ test("Codex thread routes retain their existing local mapping", () => {
   });
 });
 
+test("conversation query state such as temporary-chat survives refresh", () => {
+  const routes = loadRoutes();
+
+  assert.deepEqual(
+    routes.mapBrowserPathToInitialRoute(
+      "/work/conversation/server-id",
+      "?temporary-chat=true",
+    ),
+    { memoryPath: "/work/conversation/server-id?temporary-chat=true" },
+  );
+  assert.deepEqual(
+    routes.mapBrowserPathToInitialRoute("/thread/task-id", "?foo=bar"),
+    { memoryPath: "/local/task-id?foo=bar" },
+  );
+  assert.deepEqual(routes.mapBrowserPathToInitialRoute("/", "?prompt=hi"), {
+    memoryPath: "/?prompt=hi",
+  });
+  assert.deepEqual(
+    routes.mapMemoryPathToBrowserPath(
+      "/work/conversation/server-id",
+      "?temporary-chat=true",
+    ),
+    { path: "/work/conversation/server-id?temporary-chat=true" },
+  );
+});
+
+test("allowlisted app pages keep their browser URL and query state", () => {
+  const routes = loadRoutes();
+
+  for (const pathname of [
+    "/projects",
+    "/settings",
+    "/settings/data-controls",
+    "/security/scans/scan-1",
+    "/automations",
+    "/skills",
+    "/remote/task-9",
+  ]) {
+    assert.deepEqual(
+      routes.mapBrowserPathToInitialRoute(pathname, ""),
+      { memoryPath: pathname },
+      pathname,
+    );
+    assert.deepEqual(
+      routes.mapMemoryPathToBrowserPath(pathname),
+      { path: pathname },
+      pathname,
+    );
+  }
+
+  assert.deepEqual(
+    routes.mapBrowserPathToInitialRoute(
+      "/automations",
+      "?automationId=abc123",
+    ),
+    { memoryPath: "/automations?automationId=abc123" },
+  );
+  assert.deepEqual(
+    routes.mapMemoryPathToBrowserPath("/automations", "?automationId=abc123"),
+    { path: "/automations?automationId=abc123" },
+  );
+});
+
+test("window-scoped or unknown pages never become browser URLs", () => {
+  const routes = loadRoutes();
+
+  for (const pathname of [
+    "/login",
+    "/welcome",
+    "/first-run",
+    "/select-workspace",
+    "/avatar-overlay",
+    "/diff",
+    "/unknown",
+    "/settings/../../etc",
+    "/settings//double",
+    "/projects/extra",
+    "/remote",
+    "/remote/a/b",
+  ]) {
+    assert.deepEqual(
+      routes.mapBrowserPathToInitialRoute(pathname, ""),
+      { memoryPath: "/" },
+      pathname,
+    );
+    assert.equal(routes.mapMemoryPathToBrowserPath(pathname), null, pathname);
+  }
+});
+
+test("unsafe query strings are dropped rather than preserved", () => {
+  const routes = loadRoutes();
+
+  for (const search of ["?a=b#frag", "no-question-mark", "?", "?a=\u0000"]) {
+    assert.deepEqual(
+      routes.mapBrowserPathToInitialRoute("/projects", search),
+      { memoryPath: "/projects" },
+      JSON.stringify(search),
+    );
+  }
+  const longSearch = `?x=${"y".repeat(3000)}`;
+  assert.deepEqual(routes.mapBrowserPathToInitialRoute("/projects", longSearch), {
+    memoryPath: "/projects",
+  });
+});
+
 test("malformed or unsafe conversation paths do not become routes", () => {
   const routes = loadRoutes();
 

@@ -796,6 +796,11 @@ function requestWorkspaceDirectoryEntries(
 }
 
 const themeMediaQuery = matchMedia("(prefers-color-scheme: dark)");
+themeMediaQuery.addEventListener("change", (event) => {
+  emitRendererEvent("codex_desktop:system-theme-variant-updated", [
+    event.matches ? "dark" : "light",
+  ]);
+});
 const mobileMediaQuery = matchMedia("(max-width: 768px)");
 const initialSidebarState = !mobileMediaQuery.matches;
 const electronShim = (window.__ELECTRON_SHIM__ ??= {});
@@ -901,7 +906,10 @@ electronShim.onMemoryNavigationChanged = (navigation) => {
     electronShim.closeSidebar?.();
   }
 
-  const browserPath = mapMemoryPathToBrowserPath(path);
+  const browserPath = mapMemoryPathToBrowserPath(
+    path,
+    navigation.location.search,
+  );
   if (browserPath == null) {
     return;
   }
@@ -910,7 +918,13 @@ electronShim.onMemoryNavigationChanged = (navigation) => {
     document.title = browserPath.titleChange;
   }
 
-  if (window.location.pathname === browserPath.path) {
+  // REPLACE navigations (settings index redirects, dialog-closing search
+  // updates) must not grow the browser history: mirroring them as pushState
+  // would let browser Back land on states the memory router erased.
+  if (
+    navigation.action === "REPLACE" ||
+    window.location.pathname + window.location.search === browserPath.path
+  ) {
     window.history.replaceState(undefined, "", browserPath.path);
     return;
   }
@@ -1059,6 +1073,9 @@ export const ipcRenderer = {
         host_config: { id: "local", display_name: "Local", kind: "local" },
         remote_ssh_connections: [],
         remote_wsl_connections: [],
+        // The renderer treats a missing connections array (unlike an empty
+        // one) as "remote connections still loading" and never settles.
+        remote_control_connections: [],
         remote_control_connections_state: {
           available: false,
           accessRequired: false,
@@ -1078,6 +1095,10 @@ export const ipcRenderer = {
       return themeMediaQuery.matches ? "dark" : "light";
     }
 
+    if (channel === "codex_desktop:start-file-drag") {
+      return false;
+    }
+
     return unimplemented("ipcRenderer.sendSync");
   },
 };
@@ -1089,14 +1110,32 @@ window.addEventListener("pagehide", () => {
   }
 });
 
+// The bundled renderer prefers native menus and native file drags whenever
+// the bridge advertises them, and falls back to its own complete DOM
+// implementations (context-menu popovers, browser upload flows) when the
+// methods are absent. Native menus and path-based drags cannot work from a
+// browser page, so hide those capabilities instead of exposing hanging or
+// throwing stubs.
+const BROWSER_UNSUPPORTED_BRIDGE_METHODS = ["showContextMenu", "startFileDrag"];
+
 export const contextBridge = {
   exposeInMainWorld(_key: string, _api: unknown): void {
+    if (_key === "electronBridge" && isRecord(_api)) {
+      const api = { ..._api };
+      for (const method of BROWSER_UNSUPPORTED_BRIDGE_METHODS) {
+        delete api[method];
+      }
+      Reflect.set(window, _key, api);
+      return;
+    }
     Reflect.set(window, _key, _api);
   },
 };
 
 export const webUtils = {
   getPathForFile(_file: File): string | null {
-    return unimplemented("webUtils.getPathForFile");
+    // No browser page can resolve a local filesystem path for a File. The
+    // renderer treats null as "no native path" and uses its upload flows.
+    return null;
   },
 };

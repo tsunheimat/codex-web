@@ -803,6 +803,19 @@ class Menu {
 
   popup(...args: unknown[]): void {
     log("Menu.popup", args);
+    // Browser clients cannot present native menus. The desktop app resolves
+    // renderer invokes (codex_desktop:show-context-menu) through the popup
+    // completion callback, so report "closed without selection" instead of
+    // leaving those invokes pending forever.
+    const [options] = args as [{ callback?: unknown }?];
+    const callback = options?.callback;
+    if (typeof callback === "function") {
+      setImmediate(() => (callback as () => void)());
+    }
+  }
+
+  closePopup(...args: unknown[]): void {
+    log("Menu.closePopup", args);
   }
 }
 

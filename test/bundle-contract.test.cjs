@@ -3,33 +3,50 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const assetName =
-  "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-BfuFOm2j.js";
-const assetPath = path.join(
+const assetsDirectory = path.join(
   __dirname,
   "..",
   "scratch",
   "asar",
   "webview",
   "assets",
-  assetName,
 );
+const appInitialAssets = fs
+  .readdirSync(assetsDirectory)
+  .filter((name) => /^app-initial-[\w-]+\.js$/.test(name));
+if (appInitialAssets.length !== 1) {
+  throw new Error(
+    `expected exactly one app-initial-*.js Desktop bundle, found: ${appInitialAssets.join(", ") || "none"}`,
+  );
+}
+const assetPath = path.join(assetsDirectory, appInitialAssets[0]);
+
+function sliceBetween(source, startAnchor, endAnchor) {
+  const start = source.indexOf(startAnchor);
+  const end = source.indexOf(endAnchor);
+  assert.ok(start >= 0, `missing slice anchor: ${startAnchor}`);
+  assert.ok(end > start, `missing or misordered slice anchor: ${endAnchor}`);
+  return source.slice(start, end);
+}
 
 test("current Desktop bundle exposes non-hidden app-server models", () => {
   const bundle = fs.readFileSync(assetPath, "utf8");
-  assert.match(bundle, /a\.forEach\(\(n\) => \{\s+if \(!n\.hidden\)/);
-  assert.doesNotMatch(bundle, /if \(l \? t\.has\(n\.model\) : !n\.hidden\)/);
+  assert.match(
+    bundle,
+    /o\.forEach\(\(r\) => \{\s+if \(e\?\.has\(r\.model\) === !0 \|\| !r\.hidden\)/,
+  );
+  assert.doesNotMatch(bundle, /u \? n\.has\(r\.model\) : !r\.hidden/);
 });
 
 test("new-thread fallback uses config then app-server catalog without a hardcoded model", () => {
   const bundle = fs.readFileSync(assetPath, "utf8");
   assert.match(
     bundle,
-    /e \? Dv\(n\?\.models, e\) : \(n\?\.defaultModel \?\? n\?\.models\[0\] \?\? null\)/,
+    /e \? GM\(n\?\.models, e\) : \(n\?\.defaultModel \?\? n\?\.models\[0\] \?\? null\)/,
   );
   assert.match(bundle, /model: r\?\.model \?\? e \?\? null/);
   assert.doesNotMatch(
-    bundle.slice(bundle.indexOf("function Ive("), bundle.indexOf("var Ov =")),
+    sliceBetween(bundle, "function ZJr(", "var KM ="),
     /gpt-|claude|deepseek|qianfan/i,
   );
 });
@@ -38,13 +55,14 @@ test("model precedence remains thread then explicit setting then effective confi
   const bundle = fs.readFileSync(assetPath, "utf8");
   assert.match(bundle, /model: w \?\? p\.model/);
 
-  const configAwareSelection = bundle.slice(
-    bundle.indexOf("function Jve("),
-    bundle.indexOf("function Yve("),
+  const configAwareSelection = sliceBetween(
+    bundle,
+    "function uYr(",
+    "function mYr(",
   );
   assert.match(configAwareSelection, /let C = m\?\.model \?\? null/);
-  assert.match(configAwareSelection, /userSavedModelString: T \? null : C/);
-  assert.match(configAwareSelection, /E = Kve\([\s\S]*?,\s+f,\s+\)/);
+  assert.match(configAwareSelection, /userSavedModelString: E \? null : C/);
+  assert.match(configAwareSelection, /D = cYr\([\s\S]*?,\s+f,\s+\)/);
 });
 
 test("HTTP browser bridge does not depend on secure-context randomUUID", () => {

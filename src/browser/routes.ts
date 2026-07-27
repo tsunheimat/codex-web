@@ -1,3 +1,46 @@
+// Memory-router pages that are safe to mirror into the browser URL so
+// refresh, history, and deep links keep working. Window- or flow-scoped
+// routes (onboarding, login, diff windows, overlays) are intentionally
+// absent: reloading into them without their host window state is wrong.
+const MIRRORED_PAGE_PATTERN =
+  /^\/(?:automations|inbox|library|plugins|projects|pull-requests|remote-connections|sites|skills)$/;
+// The memory router defines /remote/:taskId but no bare /remote page, so
+// only task-scoped remote paths are mirrorable.
+const MIRRORED_SECTION_PATTERN =
+  /^\/(?:settings|security)(?:\/|$)|^\/remote\/[^/]+$/;
+
+const MAX_MIRRORED_PATH_LENGTH = 512;
+const MAX_MIRRORED_SEARCH_LENGTH = 2048;
+
+function sanitizeBrowserSearch(search: string): string {
+  if (
+    search === "" ||
+    search === "?" ||
+    !search.startsWith("?") ||
+    search.length > MAX_MIRRORED_SEARCH_LENGTH ||
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u001f\u007f#]/.test(search)
+  ) {
+    return "";
+  }
+  return search;
+}
+
+function isMirroredPagePath(pathname: string): boolean {
+  if (
+    pathname.length > MAX_MIRRORED_PATH_LENGTH ||
+    !/^\/[A-Za-z0-9\-._~%/]*$/.test(pathname) ||
+    pathname.includes("//") ||
+    /(^|\/)\.\.?(\/|$)/.test(pathname)
+  ) {
+    return false;
+  }
+  return (
+    MIRRORED_PAGE_PATTERN.test(pathname) ||
+    MIRRORED_SECTION_PATTERN.test(pathname)
+  );
+}
+
 export function mapBrowserPathToInitialRoute(pathname: string, search: string) {
   if (pathname === "/share/receive" && search) {
     const params = new URLSearchParams(search);
@@ -18,7 +61,7 @@ export function mapBrowserPathToInitialRoute(pathname: string, search: string) {
   }
 
   return {
-    memoryPath: mapBrowserPathToRoute(pathname),
+    memoryPath: mapBrowserPathToRoute(pathname, search),
   };
 }
 
@@ -59,6 +102,7 @@ function parseBrowserConversationPath(
       !(
         threadId.length > 0 &&
         threadId.length <= 128 &&
+        // eslint-disable-next-line no-control-regex
         !/[\u0000-\u001f\u007f/?#]/.test(threadId)
       )
     ) {
@@ -73,34 +117,49 @@ function parseBrowserConversationPath(
   }
 }
 
-function mapBrowserPathToRoute(pathname: string): string {
+function mapBrowserPathToRoute(pathname: string, search = ""): string {
+  const preservedSearch = sanitizeBrowserSearch(search);
   const conversation = parseBrowserConversationPath(pathname);
-  if (conversation === null) {
-    return "/";
+  if (conversation !== null) {
+    const encodedThreadId = encodeURIComponent(conversation.threadId);
+    // ChatGPT Work conversations keep their query state (for example
+    // temporary-chat=true) so refresh restores the same conversation mode.
+    return conversation.kind === "chatgpt"
+      ? `/work/conversation/${encodedThreadId}${preservedSearch}`
+      : `/local/${conversation.threadId}${preservedSearch}`;
   }
-  const encodedThreadId = encodeURIComponent(conversation.threadId);
-  return conversation.kind === "chatgpt"
-    ? `/work/conversation/${encodedThreadId}`
-    : `/local/${conversation.threadId}`;
+  if (isMirroredPagePath(pathname)) {
+    return `${pathname}${preservedSearch}`;
+  }
+  return pathname === "/" ? `/${preservedSearch}` : "/";
 }
 
-export function mapMemoryPathToBrowserPath(pathname: string) {
+export function mapMemoryPathToBrowserPath(pathname: string, search = "") {
+  const preservedSearch = sanitizeBrowserSearch(search);
+
   if (pathname === "/") {
-    return { path: "/", titleChange: "Codex" };
+    return { path: `/${preservedSearch}`, titleChange: "Codex" };
   }
 
   const match = pathname.match(/^\/local\/([^/?#]+)$/);
   if (match) {
-    return { path: `/thread/${encodeURIComponent(match[1])}` };
+    return {
+      path: `/thread/${encodeURIComponent(match[1])}${preservedSearch}`,
+    };
   }
 
   const chatGptRoute = parseBrowserConversationPath(pathname);
-  if (chatGptRoute?.kind !== "chatgpt") {
-    return null;
+  if (chatGptRoute?.kind === "chatgpt") {
+    return {
+      path: `/work/conversation/${encodeURIComponent(chatGptRoute.threadId)}${preservedSearch}`,
+    };
   }
-  return {
-    path: `/work/conversation/${encodeURIComponent(chatGptRoute.threadId)}`,
-  };
+
+  if (isMirroredPagePath(pathname)) {
+    return { path: `${pathname}${preservedSearch}` };
+  }
+
+  return null;
 }
 
 export function dispatchNavigateToRoute(path: string): void {
@@ -115,5 +174,7 @@ export function dispatchNavigateToRoute(path: string): void {
 }
 
 window.addEventListener("popstate", () => {
-  dispatchNavigateToRoute(mapBrowserPathToRoute(window.location.pathname));
+  dispatchNavigateToRoute(
+    mapBrowserPathToRoute(window.location.pathname, window.location.search),
+  );
 });

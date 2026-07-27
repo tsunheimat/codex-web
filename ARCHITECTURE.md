@@ -51,6 +51,24 @@ directly (file picker, workspace picker). today, the remaining parts of shim are
 for connecting the in memory router to the browser history and setting up the
 sidebar behavior on mobile.
 
+The bundled renderer feature-gates native integrations on the presence of
+`electronBridge` methods and ships complete web fallbacks for them. The shim
+therefore hides capabilities a browser page cannot provide — `showContextMenu`
+(renderer falls back to its DOM context menus) and `startFileDrag` (native
+path-based drags) — instead of stubbing them, and `webUtils.getPathForFile`
+returns null so file handling uses the renderer's upload flows. The server-side
+`Menu.popup` stub still resolves its completion callback so any residual native
+menu invoke settles as "dismissed" rather than hanging.
+
+Browser URL mapping mirrors an allowlist of memory-router pages (threads,
+work conversations, automations, projects, settings/security subtrees, and so
+on in `src/browser/routes.ts`) together with a sanitized query string in both
+directions, so refresh and deep links preserve state such as
+`?temporary-chat=true`. Window-scoped flows (onboarding, login, diff windows,
+overlays) are intentionally never mirrored. REPLACE navigations from the
+memory router map to `history.replaceState` so browser Back cannot land on
+states the renderer erased.
+
 The websocket is a replaceable transport for a short-lived, page-scoped
 reliable bridge session. Both sides assign sequence numbers, acknowledge
 received messages, retain bounded unacknowledged messages, and suppress
