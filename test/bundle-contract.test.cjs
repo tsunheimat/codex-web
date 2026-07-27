@@ -89,6 +89,12 @@ test("ChatGPT pubsub uses the same-origin relay and separate hydration recovery"
   assert.match(browserRelay, /"ws\.chatgpt-staging\.com"/);
   assert.match(browserRelay, /CHATGPT_PUBSUB_RECOVERY_COOLDOWN_MS/);
   assert.match(browserRelay, /window\.location\.reload\(\)/);
+  assert.match(browserRelay, /ChatGptPubsubRecoveryTracker/);
+  assert.match(browserRelay, /takeFailureSignal\(\)/);
+  assert.match(
+    browserRelay,
+    /dispatchEvent\([\s\S]{0,100}new MessageEvent\("message", \{ data: failure\.data \}\)/,
+  );
   assert.match(server, /chatGptPubsubRelay\.handleUpgrade/);
   assert.match(viteConfig, /"\/__backend\/chatgpt-pubsub"/);
   assert.doesNotMatch(

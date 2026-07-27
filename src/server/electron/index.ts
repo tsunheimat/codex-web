@@ -70,8 +70,55 @@ function getIpcMainBridgeState(): IpcMainBridgeState {
   return globals.__codexElectronIpcBridge;
 }
 
-function log(method: string, args: unknown[]): void {
-  console.log(`[electron-main-stub] ${method}`, args);
+const MAX_LOGGED_ARGUMENTS = 6;
+const MAX_LOGGED_METHOD_LENGTH = 96;
+const DEEP_STUB_PROPERTY_LABEL = "<property>";
+
+function summarizeLogArgument(argument: unknown): string {
+  if (argument === null) {
+    return "null";
+  }
+
+  switch (typeof argument) {
+    case "string":
+      return `string(length=${argument.length})`;
+    case "function":
+      return "callable";
+    case "object":
+      return "object";
+    case "bigint":
+      return "bigint";
+    case "boolean":
+      return "boolean";
+    case "number":
+      return "number";
+    case "symbol":
+      return "symbol";
+    case "undefined":
+      return "undefined";
+  }
+
+  return "unknown";
+}
+
+function summarizeLogMethod(method: string): string {
+  const singleLineMethod = method.replace(/[\u0000-\u001f\u007f]/g, "?");
+  if (singleLineMethod.length <= MAX_LOGGED_METHOD_LENGTH) {
+    return singleLineMethod;
+  }
+  return `${singleLineMethod.slice(0, MAX_LOGGED_METHOD_LENGTH - 3)}...`;
+}
+
+function log(method: string, args: readonly unknown[]): void {
+  const visibleArguments = args
+    .slice(0, MAX_LOGGED_ARGUMENTS)
+    .map(summarizeLogArgument);
+  const omittedArgumentCount = args.length - visibleArguments.length;
+  const omittedSummary =
+    omittedArgumentCount > 0 ? ` omitted=${omittedArgumentCount}` : "";
+  console.log(
+    `[electron-main-stub] ${summarizeLogMethod(method)} argc=${args.length} args=[${visibleArguments.join(", ")}]${omittedSummary}`,
+  );
 }
 
 function createDeepStub(pathLabel: string): StubFunction {
@@ -98,7 +145,7 @@ function createDeepStub(pathLabel: string): StubFunction {
         return () => pathLabel;
       }
 
-      return createDeepStub(`${pathLabel}.${String(prop)}`);
+      return createDeepStub(`${pathLabel}.${DEEP_STUB_PROPERTY_LABEL}`);
     },
   });
 }
@@ -109,7 +156,7 @@ function withDeepStubFallback<T extends object>(target: T, label: string): T {
       if (prop in currentTarget) {
         return currentTarget[prop as keyof T];
       }
-      return createDeepStub(`${label}.${String(prop)}`);
+      return createDeepStub(`${label}.${DEEP_STUB_PROPERTY_LABEL}`);
     },
   });
 }
@@ -1039,9 +1086,7 @@ const session = {
     log("session.fromPartition", [partition]);
     let partitionSession = partitionSessions.get(partition);
     if (!partitionSession) {
-      partitionSession = createSessionStub(
-        `session.fromPartition(${partition})`,
-      );
+      partitionSession = createSessionStub("session.partition");
       partitionSessions.set(partition, partitionSession);
     }
     return partitionSession;

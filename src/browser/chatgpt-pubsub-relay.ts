@@ -1,4 +1,5 @@
-import { currentThreadIdFromBrowserPath } from "./routes";
+import { ChatGptPubsubRecoveryTracker } from "./chatgpt-pubsub-recovery";
+import { currentConversationIdFromBrowserPath } from "./routes";
 
 const CHATGPT_PUBSUB_RELAY_PATH = "/__backend/chatgpt-pubsub";
 const CHATGPT_PUBSUB_RELAY_PROTOCOL_PREFIX = "codex-web-chatgpt-pubsub.";
@@ -23,10 +24,6 @@ let chatGptPubsubNeedsHydration = false;
 let chatGptPubsubRecoveryPath: string | null = null;
 let chatGptPubsubRecoveryTimer: number | null = null;
 let relayInstalled = false;
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function browserSessionStorage(): Storage | null {
   try {
@@ -84,6 +81,27 @@ function cancelChatGptPubsubRecoveryTimer(): void {
   if (chatGptPubsubRecoveryTimer !== null) {
     window.clearTimeout(chatGptPubsubRecoveryTimer);
     chatGptPubsubRecoveryTimer = null;
+  }
+}
+
+function clearChatGptPubsubHydrationRecovery(): void {
+  chatGptPubsubNeedsHydration = false;
+  chatGptPubsubRecoveryPath = null;
+  cancelChatGptPubsubRecoveryTimer();
+}
+
+function applyChatGptPubsubTopicChanges(changes: {
+  activatedTopics: readonly string[];
+  deactivatedTopics: readonly string[];
+}): void {
+  for (const topicId of changes.activatedTopics) {
+    chatGptPubsubActiveTopics.add(topicId);
+  }
+  for (const topicId of changes.deactivatedTopics) {
+    chatGptPubsubActiveTopics.delete(topicId);
+  }
+  if (chatGptPubsubActiveTopics.size === 0 && !chatGptPubsubNeedsHydration) {
+    cancelChatGptPubsubRecoveryTimer();
   }
 }
 
@@ -166,108 +184,12 @@ function markChatGptPubsubTransportFailed(): void {
   const currentPath = window.location.pathname;
   if (
     chatGptPubsubRecoveryPath === null ||
-    (currentThreadIdFromBrowserPath(chatGptPubsubRecoveryPath) === null &&
-      currentThreadIdFromBrowserPath(currentPath) !== null)
+    (currentConversationIdFromBrowserPath(chatGptPubsubRecoveryPath) === null &&
+      currentConversationIdFromBrowserPath(currentPath) !== null)
   ) {
     chatGptPubsubRecoveryPath = currentPath;
   }
   scheduleChatGptPubsubHydrationRecovery();
-}
-
-function observeChatGptPubsubCommand(data: unknown): void {
-  if (typeof data !== "string") {
-    return;
-  }
-
-  let commands: unknown;
-  try {
-    commands = JSON.parse(data);
-  } catch {
-    return;
-  }
-  if (!Array.isArray(commands)) {
-    return;
-  }
-
-  for (const entry of commands) {
-    if (!isPlainRecord(entry) || !isPlainRecord(entry.command)) {
-      continue;
-    }
-    const command = entry.command;
-    const topicId = command.topic_id;
-    if (typeof topicId !== "string" || !topicId.startsWith("conversation-")) {
-      continue;
-    }
-    if (command.type === "subscribe") {
-      chatGptPubsubActiveTopics.add(topicId);
-    } else if (command.type === "unsubscribe") {
-      chatGptPubsubActiveTopics.delete(topicId);
-      if (
-        chatGptPubsubActiveTopics.size === 0 &&
-        !chatGptPubsubNeedsHydration
-      ) {
-        cancelChatGptPubsubRecoveryTimer();
-      }
-    }
-  }
-}
-
-function chatGptPubsubStreamMessages(frame: unknown): unknown[] {
-  if (!Array.isArray(frame)) {
-    return [];
-  }
-
-  const messages: unknown[] = [];
-  for (const entry of frame) {
-    messages.push(entry);
-    if (
-      isPlainRecord(entry) &&
-      isPlainRecord(entry.reply) &&
-      Array.isArray(entry.reply.catchups)
-    ) {
-      messages.push(...entry.reply.catchups);
-    }
-  }
-  return messages;
-}
-
-function observeChatGptPubsubMessage(data: unknown): void {
-  if (typeof data !== "string") {
-    return;
-  }
-
-  let frame: unknown;
-  try {
-    frame = JSON.parse(data);
-  } catch {
-    return;
-  }
-
-  let receivedStreamMessage = false;
-  for (const message of chatGptPubsubStreamMessages(frame)) {
-    if (
-      !isPlainRecord(message) ||
-      typeof message.topic_id !== "string" ||
-      !message.topic_id.startsWith("conversation-") ||
-      !isPlainRecord(message.payload) ||
-      message.payload.type !== "conversation-turn-stream" ||
-      !isPlainRecord(message.payload.payload) ||
-      typeof message.payload.payload.type !== "string"
-    ) {
-      continue;
-    }
-
-    receivedStreamMessage = true;
-    if (message.payload.payload.type === "done") {
-      chatGptPubsubActiveTopics.delete(message.topic_id);
-    }
-  }
-
-  if (receivedStreamMessage) {
-    chatGptPubsubNeedsHydration = false;
-    chatGptPubsubRecoveryPath = null;
-    cancelChatGptPubsubRecoveryTimer();
-  }
 }
 
 export function installChatGptPubsubRelay(): void {
@@ -279,6 +201,7 @@ export function installChatGptPubsubRelay(): void {
 
   class CodexWebWebSocket extends NativeWebSocket {
     private readonly relaysChatGptPubsub: boolean;
+    private readonly recoveryTracker = new ChatGptPubsubRecoveryTracker();
 
     constructor(url: string | URL, protocols?: string | string[]) {
       const relay =
@@ -295,10 +218,36 @@ export function installChatGptPubsubRelay(): void {
 
       this.relaysChatGptPubsub = relay !== null;
       if (this.relaysChatGptPubsub) {
-        this.addEventListener("message", (event) =>
-          observeChatGptPubsubMessage(event.data),
-        );
-        this.addEventListener("close", markChatGptPubsubTransportFailed);
+        this.addEventListener("message", (event) => {
+          const changes = this.recoveryTracker.observeIncoming(event.data);
+          applyChatGptPubsubTopicChanges(changes);
+          if (changes.receivedStreamMessage) {
+            clearChatGptPubsubHydrationRecovery();
+          }
+        });
+        this.addEventListener("close", () => {
+          const failure = this.recoveryTracker.takeFailureSignal();
+          if (failure === null) {
+            markChatGptPubsubTransportFailed();
+            return;
+          }
+
+          applyChatGptPubsubTopicChanges({
+            activatedTopics: [],
+            deactivatedTopics: failure.topicIds,
+          });
+          if (chatGptPubsubActiveTopics.size === 0) {
+            clearChatGptPubsubHydrationRecovery();
+          }
+
+          // This listener is installed by the constructor before ChatGPT adds
+          // its own close listener. Delivering an invalid pubsub frame here
+          // activates ChatGPT's built-in authoritative REST polling instead of
+          // leaving a turn indefinitely suspended behind a dead relay.
+          this.dispatchEvent(
+            new MessageEvent("message", { data: failure.data }),
+          );
+        });
         this.addEventListener("error", markChatGptPubsubTransportFailed);
       }
     }
@@ -306,10 +255,12 @@ export function installChatGptPubsubRelay(): void {
     override send(
       data: string | ArrayBufferLike | Blob | ArrayBufferView,
     ): void {
-      if (this.relaysChatGptPubsub) {
-        observeChatGptPubsubCommand(data);
-      }
       super.send(data);
+      if (this.relaysChatGptPubsub) {
+        applyChatGptPubsubTopicChanges(
+          this.recoveryTracker.observeOutgoing(data),
+        );
+      }
     }
   }
 

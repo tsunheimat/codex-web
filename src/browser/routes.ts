@@ -25,25 +25,63 @@ export function mapBrowserPathToInitialRoute(pathname: string, search: string) {
 export function currentThreadIdFromBrowserPath(
   pathname: string,
 ): string | null {
-  const match = pathname.match(/^\/thread\/([^/]+)$/);
+  const conversation = parseBrowserConversationPath(pathname);
+  return conversation?.kind === "codex" ? conversation.threadId : null;
+}
+
+export function currentConversationIdFromBrowserPath(
+  pathname: string,
+): string | null {
+  return parseBrowserConversationPath(pathname)?.threadId ?? null;
+}
+
+type BrowserConversationPath = {
+  kind: "chatgpt" | "codex";
+  threadId: string;
+};
+
+function parseBrowserConversationPath(
+  pathname: string,
+): BrowserConversationPath | null {
+  const match = pathname.match(
+    /^(?:\/thread\/(?<codex>[^/]+)|\/work\/conversation\/(?<chatgpt>[^/]+))$/,
+  );
   if (!match) {
     return null;
   }
   try {
-    const threadId = decodeURIComponent(match[1]);
-    return threadId.length > 0 &&
-      threadId.length <= 128 &&
-      !/[\u0000-\u001f\u007f/?#]/.test(threadId)
-      ? threadId
-      : null;
+    const encodedThreadId = match.groups?.codex ?? match.groups?.chatgpt;
+    if (encodedThreadId === undefined) {
+      return null;
+    }
+    const threadId = decodeURIComponent(encodedThreadId);
+    if (
+      !(
+        threadId.length > 0 &&
+        threadId.length <= 128 &&
+        !/[\u0000-\u001f\u007f/?#]/.test(threadId)
+      )
+    ) {
+      return null;
+    }
+    return {
+      kind: match.groups?.chatgpt === undefined ? "codex" : "chatgpt",
+      threadId,
+    };
   } catch {
     return null;
   }
 }
 
 function mapBrowserPathToRoute(pathname: string): string {
-  const threadId = currentThreadIdFromBrowserPath(pathname);
-  return threadId === null ? "/" : `/local/${threadId}`;
+  const conversation = parseBrowserConversationPath(pathname);
+  if (conversation === null) {
+    return "/";
+  }
+  const encodedThreadId = encodeURIComponent(conversation.threadId);
+  return conversation.kind === "chatgpt"
+    ? `/work/conversation/${encodedThreadId}`
+    : `/local/${conversation.threadId}`;
 }
 
 export function mapMemoryPathToBrowserPath(pathname: string) {
@@ -52,11 +90,17 @@ export function mapMemoryPathToBrowserPath(pathname: string) {
   }
 
   const match = pathname.match(/^\/local\/([^/?#]+)$/);
-  if (!match) {
-    return null;
+  if (match) {
+    return { path: `/thread/${encodeURIComponent(match[1])}` };
   }
 
-  return { path: `/thread/${encodeURIComponent(match[1])}` };
+  const chatGptRoute = parseBrowserConversationPath(pathname);
+  if (chatGptRoute?.kind !== "chatgpt") {
+    return null;
+  }
+  return {
+    path: `/work/conversation/${encodeURIComponent(chatGptRoute.threadId)}`,
+  };
 }
 
 export function dispatchNavigateToRoute(path: string): void {

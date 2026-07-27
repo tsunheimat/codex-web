@@ -41,16 +41,19 @@
     "better-sqlite3": "^12.9.0",
     "fastify": "^5.8.5",
     "glob": "^13.0.6",
+    "https-proxy-agent": "^9.1.0",
     "node-pty": "1.1.0",
     "prettier": "^3.8.2",
+    "proxy-from-env": "^2.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "sharp-cli": "^5.2.0",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
-    "ws": "^8.20.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@types/proxy-from-env": "^1.0.4",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "electron": "41.2.0",
