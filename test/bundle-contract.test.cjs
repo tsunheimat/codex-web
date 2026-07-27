@@ -61,6 +61,42 @@ test("HTTP browser bridge does not depend on secure-context randomUUID", () => {
   assert.match(shim, /reportedRendererListenerErrors\.has\(channel\)/);
 });
 
+test("ChatGPT pubsub uses the same-origin relay and separate hydration recovery", () => {
+  const shim = fs.readFileSync(
+    path.join(__dirname, "..", "src", "browser", "shim.ts"),
+    "utf8",
+  );
+  const browserRelay = fs.readFileSync(
+    path.join(__dirname, "..", "src", "browser", "chatgpt-pubsub-relay.ts"),
+    "utf8",
+  );
+  const server = fs.readFileSync(
+    path.join(__dirname, "..", "src", "server", "main.ts"),
+    "utf8",
+  );
+  const viteConfig = fs.readFileSync(
+    path.join(__dirname, "..", "vite.browser.config.ts"),
+    "utf8",
+  );
+  const desktopBundle = fs.readFileSync(assetPath, "utf8");
+
+  assert.match(desktopBundle, /let n = new WebSocket\(t\)/);
+  assert.match(shim, /installChatGptPubsubRelay\(\)/);
+  assert.match(browserRelay, /class CodexWebWebSocket extends NativeWebSocket/);
+  assert.match(browserRelay, /codex-web-chatgpt-pubsub\./);
+  assert.match(browserRelay, /"chatgpt\.com"/);
+  assert.match(browserRelay, /"ws\.chatgpt\.com"/);
+  assert.match(browserRelay, /"ws\.chatgpt-staging\.com"/);
+  assert.match(browserRelay, /CHATGPT_PUBSUB_RECOVERY_COOLDOWN_MS/);
+  assert.match(browserRelay, /window\.location\.reload\(\)/);
+  assert.match(server, /chatGptPubsubRelay\.handleUpgrade/);
+  assert.match(viteConfig, /"\/__backend\/chatgpt-pubsub"/);
+  assert.doesNotMatch(
+    browserRelay,
+    /CHATGPT_PUBSUB_RELAY_PATH[\s\S]{0,1000}searchParams\.set/,
+  );
+});
+
 test("browser reliable bridge rejects acknowledgements above the sent id", () => {
   const shim = fs.readFileSync(
     path.join(__dirname, "..", "src", "browser", "shim.ts"),

@@ -59,6 +59,17 @@ peer has not acknowledged. The connection id and acknowledgement state live in
 the loaded page: hard refresh, Browser close/reopen, server restart, and an
 expired grace period are explicitly not durable recovery mechanisms.
 
+ChatGPT-mode completion streaming is separate from that IPC bridge and from
+Codex app-server turns. The Desktop renderer obtains a signed ChatGPT pubsub
+WebSocket URL after `stream_handoff`. The browser shim routes only the exact
+ChatGPT hosts supported by the bundled renderer through
+`/__backend/chatgpt-pubsub`; the server validates the target again and relays
+frames with bounded buffering. The signed target is carried in the WebSocket
+subprotocol header so it is not placed in request URLs or server logs. If an
+active ChatGPT topic loses the relay and cannot recover, the browser performs a
+cooldown-limited reload to hydrate the saved conversation. This recovery does
+not enter the app-server `RendererRecoveryCoordinator` path.
+
 The HTML shell and stable `assets/preload.js` entry are always revalidated.
 Only content-hashed assets receive immutable one-year caching.
 

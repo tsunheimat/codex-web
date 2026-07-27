@@ -1,3 +1,4 @@
+import { installChatGptPubsubRelay } from "./chatgpt-pubsub-relay";
 import {
   currentThreadIdFromBrowserPath,
   mapBrowserPathToInitialRoute,
@@ -207,6 +208,8 @@ declare global {
 }
 
 declare const __CODEX_APP_VERSION__: string;
+
+installChatGptPubsubRelay();
 
 let requestCounter = 0;
 let socket: WebSocket | null = null;

@@ -19,6 +19,10 @@ import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
 import { cacheControlForResponse } from "./cache-policy";
 import {
+  CHATGPT_PUBSUB_RELAY_PATH,
+  ChatGptPubsubRelay,
+} from "./chatgpt-pubsub-relay";
+import {
   createAuthoritativeThreadReader,
   type DesktopInvoke,
 } from "./authoritative-thread-reader";
@@ -355,6 +359,7 @@ function sendBridgeReset(socket: WebSocket, reason: string): void {
 function createServerCleanupAuthority({
   app,
   bridgeState,
+  chatGptPubsubRelay,
   sessions,
   websocketServer,
   workspaceFileAuthority,
@@ -362,6 +367,7 @@ function createServerCleanupAuthority({
 }: {
   app: FastifyInstance;
   bridgeState: IpcMainBridgeState;
+  chatGptPubsubRelay: ChatGptPubsubRelay;
   sessions: Map<
     string,
     ReliableBridgeSession<RendererToMainMessage, MainToRendererMessage>
@@ -407,6 +413,12 @@ function createServerCleanupAuthority({
             resolve();
           });
         });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+
+      try {
+        await chatGptPubsubRelay.close();
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -491,6 +503,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const bridgeState = getIpcMainBridgeState();
   const app = Fastify({ logger: false });
   const websocketServer = new WebSocketServer({ noServer: true });
+  const chatGptPubsubRelay = new ChatGptPubsubRelay();
   const serverEpoch = randomUUID();
   const bridgeCapacity = new ReliableBridgeCapacity();
   const sessions = new Map<
@@ -563,6 +576,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   const cleanupAuthority = createServerCleanupAuthority({
     app,
     bridgeState,
+    chatGptPubsubRelay,
     sessions,
     websocketServer,
     workspaceFileAuthority,
@@ -629,6 +643,12 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     const requestUrl = request.url ?? "/";
     const host = request.headers.host ?? "localhost";
     const url = new URL(requestUrl, `http://${host}`);
+    if (url.pathname === CHATGPT_PUBSUB_RELAY_PATH) {
+      if (!chatGptPubsubRelay.handleUpgrade(request, socket, head)) {
+        socket.destroy();
+      }
+      return;
+    }
     if (url.pathname !== "/__backend/ipc") {
       socket.destroy();
       return;
