@@ -73,10 +73,13 @@ docker compose run --rm codex-web codex login --device-auth
 ### workspace file boundary
 
 The project picker, workspace file previews/downloads, and workspace-related
-runtime roots are restricted to `CODEX_WEBUI_BROWSE_ROOT` by default. It
-defaults to the server user's home directory. Set it to the directory that
-should be available to Browser users before starting the server; container
-deployments can use `/workspace` without changing source code:
+runtime roots are restricted to `CODEX_WEBUI_BROWSE_ROOT` by default. Pasted
+images are the narrow exception: the server can serve only the Desktop
+clipboard artifacts it created in its private runtime directory, never the
+runtime directory itself. The browse root defaults to the server user's home
+directory. Set it to the directory that should be available to Browser users
+before starting the server; container deployments can use `/workspace` without
+changing source code:
 
 ```bash
 CODEX_WEBUI_BROWSE_ROOT=/workspace codex-web

@@ -45,7 +45,7 @@ export type StoredWorkspaceUpload = {
 export type OpenedAllowedWorkspaceFile = {
   path: string;
   downloadName: string;
-  source: "upload" | "workspace";
+  source: "clipboard" | "upload" | "workspace";
   stream: Readable;
 };
 
@@ -77,8 +77,12 @@ type ActiveUpload = {
 type ClassifiedPath = {
   requestedPath: string;
   relativePath: string;
-  root: "browse" | "upload";
+  root: "browse" | "clipboard" | "upload";
 };
+
+// Matches the exact names emitted by the Desktop clipboard persistence service.
+const CLIPBOARD_IMAGE_NAME =
+  /^codex-clipboard-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:gif|jpg|png|webp)$/;
 
 export class WorkspacePathError extends Error {
   constructor(
@@ -478,6 +482,7 @@ export class WorkspaceFileAuthority {
 
   private readonly browseRootHandle: FileHandle;
   private readonly projectBrowseRootHandle: FileHandle | null;
+  private readonly runtimeRootHandle: FileHandle;
   private readonly uploadRootHandle: FileHandle;
   private readonly uploadedFiles = new Map<string, UploadRecord>();
   private readonly activeUploadDiscards = new Map<string, Promise<void>>();
@@ -498,6 +503,7 @@ export class WorkspaceFileAuthority {
     uploadQuotaBytes: number,
     browseRootHandle: FileHandle,
     projectBrowseRootHandle: FileHandle | null,
+    runtimeRootHandle: FileHandle,
     uploadRootHandle: FileHandle,
   ) {
     this.browseRoot = browseRoot;
@@ -507,6 +513,7 @@ export class WorkspaceFileAuthority {
     this.uploadQuotaBytes = uploadQuotaBytes;
     this.browseRootHandle = browseRootHandle;
     this.projectBrowseRootHandle = projectBrowseRootHandle;
+    this.runtimeRootHandle = runtimeRootHandle;
     this.uploadRootHandle = uploadRootHandle;
   }
 
@@ -525,6 +532,7 @@ export class WorkspaceFileAuthority {
     );
     let browseRootHandle: FileHandle | null = null;
     let projectBrowseRootHandle: FileHandle | null = null;
+    let runtimeRootHandle: FileHandle | null = null;
     let uploadRootHandle: FileHandle | null = null;
     let runtimeRoot: string | null = null;
     try {
@@ -566,6 +574,19 @@ export class WorkspaceFileAuthority {
       runtimeRoot = await fs.mkdtemp(
         path.join(temporaryParent, "codex-web-runtime-"),
       );
+      const runtimeRootChangedMessage =
+        "Workspace runtime root changed while it was pinned";
+      const expectedRuntimeRootStat = await captureDirectoryIdentity(
+        runtimeRoot,
+        runtimeRootChangedMessage,
+      );
+      runtimeRootHandle = await fs.open(runtimeRoot, PINNED_ROOT_OPEN_FLAGS);
+      const runtimeStat = await runtimeRootHandle.stat({ bigint: true });
+      validatePinnedDirectoryIdentity(
+        runtimeStat,
+        expectedRuntimeRootStat,
+        runtimeRootChangedMessage,
+      );
       const uploadRoot = path.join(runtimeRoot, "uploads");
       await fs.mkdir(uploadRoot, { mode: 0o700 });
       const uploadRootChangedMessage =
@@ -590,11 +611,13 @@ export class WorkspaceFileAuthority {
         uploadQuotaBytes,
         browseRootHandle,
         projectBrowseRootHandle,
+        runtimeRootHandle,
         uploadRootHandle,
       );
     } catch (error) {
       await Promise.allSettled([
         closeHandle(uploadRootHandle),
+        closeHandle(runtimeRootHandle),
         closeHandle(projectBrowseRootHandle),
         closeHandle(browseRootHandle),
       ]);
@@ -621,8 +644,9 @@ export class WorkspaceFileAuthority {
     uploadOperations: number;
   } {
     return {
-      rootDescriptors:
-        this.cleanedUp ? 0 : 2 + Number(this.projectBrowseRootHandle !== null),
+      rootDescriptors: this.cleanedUp
+        ? 0
+        : 3 + Number(this.projectBrowseRootHandle !== null),
       readDescriptors: this.activeReadStreams.size,
       uploadOperations: this.activeUploads.size,
     };
@@ -662,6 +686,19 @@ export class WorkspaceFileAuthority {
         relativePath: path.relative(this.uploadRoot, requestedPath),
         root: "upload",
       };
+    }
+    if (isPathInside(requestedPath, this.runtimeRoot)) {
+      const relativePath = path.relative(this.runtimeRoot, requestedPath);
+      if (
+        path.dirname(relativePath) === "." &&
+        CLIPBOARD_IMAGE_NAME.test(path.basename(relativePath))
+      ) {
+        return { requestedPath, relativePath, root: "clipboard" };
+      }
+      throw new WorkspacePathError(
+        "File path is outside the allowed workspace and upload roots",
+        403,
+      );
     }
     if (isPathInside(requestedPath, this.browseRoot)) {
       return {
@@ -997,7 +1034,9 @@ export class WorkspaceFileAuthority {
     const rootHandle =
       classified.root === "upload"
         ? this.uploadRootHandle
-        : this.browseRootHandle;
+        : classified.root === "clipboard"
+          ? this.runtimeRootHandle
+          : this.browseRootHandle;
     let handle: FileHandle | null = null;
     let shouldCloseHandle = false;
     try {
@@ -1040,7 +1079,12 @@ export class WorkspaceFileAuthority {
       return {
         path: classified.requestedPath,
         downloadName,
-        source: classified.root === "upload" ? "upload" : "workspace",
+        source:
+          classified.root === "upload"
+            ? "upload"
+            : classified.root === "clipboard"
+              ? "clipboard"
+              : "workspace",
         stream,
       };
     } catch (error) {
@@ -1100,6 +1144,7 @@ export class WorkspaceFileAuthority {
       }
       for (const handle of [
         this.uploadRootHandle,
+        this.runtimeRootHandle,
         this.projectBrowseRootHandle,
         this.browseRootHandle,
       ]) {

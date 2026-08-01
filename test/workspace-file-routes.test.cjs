@@ -156,11 +156,35 @@ test("upload uses random storage names and download/static routes enforce author
   assert.equal(staticResponse.status, 200);
   assert.equal(await staticResponse.text(), "workspace endpoint bytes");
 
+  const clipboardImage = path.join(
+    item.authority.runtimeRoot,
+    "codex-clipboard-00000000-0000-4000-8000-000000000000.png",
+  );
+  const runtimeSecret = path.join(item.authority.runtimeRoot, "secret.txt");
+  const clipboardText = path.join(
+    item.authority.runtimeRoot,
+    "codex-clipboard-00000000-0000-4000-8000-000000000000.txt",
+  );
+  await fsp.writeFile(clipboardImage, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  await Promise.all([
+    fsp.writeFile(runtimeSecret, "private runtime state"),
+    fsp.writeFile(clipboardText, "not a clipboard image"),
+  ]);
+  const clipboardResponse = await fetch(atFsUrl(item.baseUrl, clipboardImage));
+  assert.equal(clipboardResponse.status, 200);
+  assert.equal(clipboardResponse.headers.get("content-type"), "image/png");
+  assert.deepEqual(
+    Buffer.from(await clipboardResponse.arrayBuffer()),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  );
+
   for (const forbiddenPath of [
     item.outsideFile,
     path.join(item.browseRoot, "folder"),
     path.join(item.browseRoot, "missing.txt"),
     path.join(item.browseRoot, "escape.txt"),
+    runtimeSecret,
+    clipboardText,
   ]) {
     const download = await fetch(
       `${item.baseUrl}/__backend/download?path=${encodeURIComponent(forbiddenPath)}`,

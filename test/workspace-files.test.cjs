@@ -427,7 +427,7 @@ test("opened workspace descriptor is consumed after deterministic pathname repla
     "replacement outside decision",
   );
   assert.deepEqual(item.authority.getActiveDescriptorState(), {
-    rootDescriptors: 2,
+    rootDescriptors: 3,
     readDescriptors: 0,
     uploadOperations: 0,
   });
@@ -705,13 +705,13 @@ test("rejections and destroyed reads close request descriptors and cleanup close
     item.browseRoot,
     item.temporaryRoot,
   );
-  assert.equal(await fdCount(), baseline + 2);
+  assert.equal(await fdCount(), baseline + 3);
 
   await assert.rejects(
     authority.openAllowedFile(path.join(item.browseRoot, "escape-file")),
     /outside its pinned authority root/,
   );
-  assert.equal(await fdCount(), baseline + 2);
+  assert.equal(await fdCount(), baseline + 3);
 
   const opened = await authority.openAllowedFile(
     path.join(item.browseRoot, "a.txt"),
@@ -719,7 +719,7 @@ test("rejections and destroyed reads close request descriptors and cleanup close
   const closed = once(opened.stream, "close");
   opened.stream.destroy();
   await closed;
-  assert.equal(await fdCount(), baseline + 2);
+  assert.equal(await fdCount(), baseline + 3);
   assert.equal(authority.getActiveDescriptorState().readDescriptors, 0);
 
   const runtimeRoot = authority.runtimeRoot;
