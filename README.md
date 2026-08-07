@@ -216,6 +216,39 @@ replace both files on Pod start. The source files must be non-empty, and the
 resulting files are written with mode `0600`; changing the ConfigMap or Secret
 does not affect a running Pod until it is restarted.
 
+When using a custom OpenAI-compatible provider, keep the two authentication
+planes separate: use ChatGPT OAuth in `auth.json` for the Codex account and
+sidebar services, and use a provider-specific environment key for model
+requests. Do not put the provider key in `config.toml` or a ConfigMap. For
+example:
+
+```toml
+model_provider = "sub2api"
+
+[model_providers.sub2api]
+base_url = "https://sub2api-hub.example/v1"
+wire_api = "responses"
+env_key = "CODEX_PROVIDER_API_KEY"
+requires_openai_auth = false
+supports_websockets = false
+```
+
+The K3s deployment accepts the optional `CODEX_PROVIDER_API_KEY` key from the
+`codex-web-provider` Secret; its name must match the `env_key` value in
+`config.toml`.
+Rotate any provider key that has appeared in a repository or ConfigMap before
+creating the replacement Secret. After changing `config.toml` or `auth.json`,
+temporarily enable `CODEX_BOOTSTRAP_FORCE_COPY=true` for one rollout so the
+new files replace the copies on the persistent volume, then return it to
+`false`.
+
+The runtime image also installs `xz-utils` because the Codex npm installer may
+retrieve xz-compressed runtime artifacts. Pin both Kubernetes image references
+to the same immutable tag or digest after publishing a rebuilt image. The
+checked-in `latest` fallback uses `imagePullPolicy: Always` so a rebuilt image
+is not hidden by a node-local cache, but immutable image references remain the
+preferred deployment setting.
+
 This controlled lifecycle does not promise active-turn migration, forced-crash
 continuation, pre-accept exactly-once behavior, zero downtime, or raw bridge
 persistence. Authentication and HTTPS remain the responsibility of the trusted

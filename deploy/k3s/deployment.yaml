@@ -31,7 +31,7 @@ spec:
           # Override this image with Kustomize to an immutable tag such as
           # ghcr.io/tsunheimat/codex-web:sha-<full SHA> for reproducible deploys.
           image: ghcr.io/tsunheimat/codex-web:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - /usr/local/bin/codex-web-init.sh
           env:
@@ -72,7 +72,7 @@ spec:
           # Keep this image name identical to the init container so Kustomize
           # image replacements update both references.
           image: ghcr.io/tsunheimat/codex-web:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: HOME
               value: /home/codex-web
@@ -82,6 +82,16 @@ spec:
               value: /workspace
             - name: CODEX_WEBUI_ALLOW_ANY_PROJECT
               value: "false"
+            # Keep the custom-provider credential separate from auth.json. The
+            # ConfigMap should contain only provider metadata with
+            # env_key = "CODEX_PROVIDER_API_KEY". The optional reference lets
+            # the generic deployment work for providers that do not need a key.
+            - name: CODEX_PROVIDER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: codex-web-provider
+                  key: CODEX_PROVIDER_API_KEY
+                  optional: true
           ports:
             - name: http
               containerPort: 8214
@@ -134,8 +144,10 @@ spec:
             claimName: codex-web-workspace
         - name: tmp
           emptyDir: {}
-        # The ConfigMap and Secret are operator-owned external inputs. Changes
-        # require a rollout because the init container copies them only at Pod start.
+        # The ConfigMap and Secrets are operator-owned external inputs. Changes
+        # require a rollout because the init container copies them only at Pod
+        # start. `codex-web-provider` is read as an environment-only
+        # credential input; it is never copied into the persistent Codex home.
         - name: bootstrap-config
           configMap:
             name: codex-web-codex-config

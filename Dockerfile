@@ -59,6 +59,7 @@ RUN apt-get update \
       git \
       openssh-client \
       tini \
+      xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
