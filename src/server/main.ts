@@ -43,6 +43,10 @@ import {
 } from "./renderer-recovery";
 import { registerWorkspaceFileRoutes } from "./workspace-file-routes";
 import {
+  decodeMessagePortData,
+  encodeMessagePortData,
+} from "./message-port-data";
+import {
   parseAllowAnyProject,
   parseUploadQuotaBytes,
   resolveConfiguredBrowseRoot,
@@ -166,7 +170,7 @@ class WebSocketMessagePort implements BridgedMessagePort {
     this.sendToRenderer({
       type: "message-port-message",
       portId: this.portId,
-      data,
+      data: encodeMessagePortData(data),
     });
   }
 
@@ -191,7 +195,7 @@ class WebSocketMessagePort implements BridgedMessagePort {
       return;
     }
     for (const listener of listeners) {
-      listener({ data });
+      listener({ data: decodeMessagePortData(data) });
     }
   }
 

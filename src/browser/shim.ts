@@ -19,6 +19,10 @@ import {
   openSelectWorkspaceRootDialog,
   type WorkspaceDirectoryEntries,
 } from "./workspace-root-dialog";
+import {
+  decodeMessagePortData,
+  encodeMessagePortData,
+} from "../server/message-port-data";
 
 type IpcListener = (event: unknown, ...args: unknown[]) => void;
 
@@ -336,7 +340,9 @@ function handleIncomingMessage(message: MainToRendererMessage): void {
   }
 
   if (message.type === "message-port-message") {
-    messagePorts.get(message.portId)?.postMessage(message.data);
+    messagePorts
+      .get(message.portId)
+      ?.postMessage(decodeMessagePortData(message.data));
     return;
   }
 
@@ -1023,7 +1029,7 @@ export const ipcRenderer = {
           enqueueMessage({
             type: "message-port-message",
             portId,
-            data: event.data,
+            data: encodeMessagePortData(event.data),
           });
         });
         transferable.addEventListener("messageerror", () => {

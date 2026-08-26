@@ -193,3 +193,19 @@ test("clipboard persistence is pinned to the authority runtime root", () => {
   assert.match(clipboardPatch, /CODEX_WEB_CLIPBOARD_TMPDIR/);
   assert.match(clipboardPatch, /\(0, d\.tmpdir\)\(\)/);
 });
+
+test("browser MessagePort transport preserves binary clipboard bytes", () => {
+  const shim = fs.readFileSync(
+    path.join(__dirname, "..", "src", "browser", "shim.ts"),
+    "utf8",
+  );
+  const server = fs.readFileSync(
+    path.join(__dirname, "..", "src", "server", "main.ts"),
+    "utf8",
+  );
+
+  assert.match(shim, /encodeMessagePortData\(event\.data\)/);
+  assert.match(shim, /decodeMessagePortData\(message\.data\)/);
+  assert.match(server, /data: encodeMessagePortData\(data\)/);
+  assert.match(server, /decodeMessagePortData\(data\)/);
+});
