@@ -194,6 +194,24 @@ test("clipboard persistence is pinned to the authority runtime root", () => {
   assert.match(clipboardPatch, /\(0, d\.tmpdir\)\(\)/);
 });
 
+test("cloud image upload infers ChatGPT auth for file endpoints", () => {
+  const prepare = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "prepare_asar"),
+    "utf8",
+  );
+  const authPatch = fs.readFileSync(
+    path.join(__dirname, "..", "patches", "webview-infer-auth-for-files.patch"),
+    "utf8",
+  );
+
+  assert.match(
+    prepare,
+    /patch --batch --forward --strip 1 --directory scratch\/asar < patches\/webview-infer-auth-for-files\.patch/,
+  );
+  assert.match(authPatch, /`\/backend-api\/files`/);
+  assert.match(authPatch, /startsWith\(`\/backend-api\/files\/`\)/);
+});
+
 test("browser MessagePort transport preserves binary clipboard bytes", () => {
   const shim = fs.readFileSync(
     path.join(__dirname, "..", "src", "browser", "shim.ts"),

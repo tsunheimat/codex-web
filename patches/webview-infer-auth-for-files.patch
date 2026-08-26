@@ -1,0 +1,13 @@
+--- a/.vite/build/main-DOHyf8yn.js
++++ b/.vite/build/main-DOHyf8yn.js
+@@ -54679,7 +54679,9 @@
+         n === `/api/wham` ||
+         n.startsWith(`/api/wham/`) ||
+         n === `/backend-api/wham` ||
+-        n.startsWith(`/backend-api/wham/`)
++        n.startsWith(`/backend-api/wham/`) ||
++        n === `/backend-api/files` ||
++        n.startsWith(`/backend-api/files/`)
+       );
+     }
+     isDesktopAuthAllowedUrl(e) {
