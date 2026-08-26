@@ -1,0 +1,11 @@
+--- a/.vite/build/main-DOHyf8yn.js
++++ b/.vite/build/main-DOHyf8yn.js
+@@ -80897,7 +80897,7 @@
+       let n = pQ.get(t);
+       if (n == null) return null;
+       let r = (0, p.join)(
+-        (0, d.tmpdir)(),
++        process.env.CODEX_WEB_CLIPBOARD_TMPDIR?.trim() || (0, d.tmpdir)(),
+         `codex-clipboard-${(0, g.randomUUID)()}.${n}`,
+       );
+       return (await (0, y.writeFile)(r, e, { flag: `wx`, mode: 384 }), r);

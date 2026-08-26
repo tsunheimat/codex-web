@@ -163,3 +163,33 @@ test("model patch is an explicit fail-closed prepare step", () => {
     "patch --batch --forward --strip 1 --directory scratch/asar < patches/webview-model-authority.patch";
   assert.equal(prepare.split(invocation).length - 1, 1);
 });
+
+test("clipboard persistence is pinned to the authority runtime root", () => {
+  const server = fs.readFileSync(
+    path.join(__dirname, "..", "src", "server", "main.ts"),
+    "utf8",
+  );
+  const prepare = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "prepare_asar"),
+    "utf8",
+  );
+  const clipboardPatch = fs.readFileSync(
+    path.join(__dirname, "..", "patches", "webview-clipboard-temp-root.patch"),
+    "utf8",
+  );
+  const clipboardAssignment =
+    "process.env.CODEX_WEB_CLIPBOARD_TMPDIR = workspaceFileAuthority.runtimeRoot;";
+  const appServerTopologyBranch = "if (ownsAppServerRuntime) {";
+
+  assert.equal(server.includes(clipboardAssignment), true);
+  assert.ok(
+    server.indexOf(clipboardAssignment) < server.indexOf(appServerTopologyBranch),
+    "clipboard root must be configured for external and owned app-server topologies",
+  );
+  assert.match(
+    prepare,
+    /patch --batch --forward --strip 1 --directory scratch\/asar < patches\/webview-clipboard-temp-root\.patch/,
+  );
+  assert.match(clipboardPatch, /CODEX_WEB_CLIPBOARD_TMPDIR/);
+  assert.match(clipboardPatch, /\(0, d\.tmpdir\)\(\)/);
+});

@@ -901,6 +901,12 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       process.env.CODEX_WEBUI_BROWSE_ROOT = workspaceFileAuthority.browseRoot;
     }
 
+    // Clipboard images are persisted by the Desktop bundle in the current
+    // process. Keep that artifact root inside the authority-owned runtime
+    // directory for both app-server topologies without changing TMPDIR for
+    // an externally managed app-server or its proxy process.
+    process.env.CODEX_WEB_CLIPBOARD_TMPDIR = workspaceFileAuthority.runtimeRoot;
+
     if (ownsAppServerRuntime) {
       // The default Desktop app-server creates TMPDIR/codex-ipc/ipc.sock but
       // Codex does not unlink that pathname when it exits. Keep it inside the
