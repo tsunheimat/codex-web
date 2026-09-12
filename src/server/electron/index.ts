@@ -1,6 +1,9 @@
 import os from "node:os";
 
 const HOME_DIRECTORY = os.homedir();
+const DEFAULT_USER_AGENT =
+  process.env.CODEX_WEB_USER_AGENT ??
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36";
 
 type StubFunction = (...args: unknown[]) => unknown;
 type StubListener = (...args: unknown[]) => void;
@@ -895,7 +898,13 @@ const net = {
   async fetch(input: string | URL, init?: RequestInit): Promise<Response> {
     // log("net.fetch", [input, init]);
     if (typeof globalThis.fetch === "function") {
-      return globalThis.fetch(input as URL | RequestInfo, init);
+      const headers = new Headers(init?.headers);
+      if (!headers.has("user-agent"))
+        headers.set("user-agent", DEFAULT_USER_AGENT);
+      return globalThis.fetch(input as URL | RequestInfo, {
+        ...init,
+        headers,
+      });
     }
     return new Response("", { status: 204 });
   },
@@ -1066,7 +1075,7 @@ function createSessionStub(label: string): {
     },
     getUserAgent(): string {
       log(`${label}.getUserAgent`, []);
-      return "Mozilla/5.0 AppleWebKit/537.36 Chrome/120 Safari/537.36";
+      return DEFAULT_USER_AGENT;
     },
     off: emitter.off,
     on: emitter.on,
