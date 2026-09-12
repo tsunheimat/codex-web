@@ -4,11 +4,15 @@
   "files": [
     "README.md",
     "scratch/asar/**/*",
+    "scratch/gateway-web/**/*",
     "src/server/**/*.js",
     "src/server/electron/index.js",
     "!**/*.ts"
   ],
-  "bin": "src/server/main.js",
+  "bin": {
+    "codex-web": "src/server/main.js",
+    "codex-web-gateway": "src/server/gateway/main.js"
+  },
   "scripts": {
     "prepare": "./scripts/prepare && npm run build:browser && npm run build:server",
     "build": "npm run prepare:asar && npm run build:browser && npm run build:server",
@@ -27,17 +31,30 @@
     "test:browser:pod-restart": "npm run build:server && npm run build:browser && CODEX_WEB_RESTART_TOPOLOGY=owned xvfb-run -a node scripts/test_browser_restart_lifecycle.cjs",
     "test:runtime": "node scripts/test_runtime_smoke.cjs",
     "test:runtime:overload": "node scripts/test_runtime_overload.cjs",
-    "test:terminal": "node scripts/test_terminal_pty.cjs"
+    "test:terminal": "node scripts/test_terminal_pty.cjs",
+    "build:gateway:web": "tsc -p src/gateway-web/tsconfig.json && vite build --config vite.gateway.config.ts",
+    "gateway": "node src/server/gateway/main.js",
+    "dev:gateway:web": "vite --config vite.gateway.config.ts",
+    "test:gateway": "npm run build:server && node --test test/gateway-*.test.cjs",
+    "mobile:sync": "npm run build:gateway:web && cap sync",
+    "mobile:add:android": "npm run build:gateway:web && cap add android",
+    "mobile:add:ios": "npm run build:gateway:web && cap add ios",
+    "test:gateway:browser": "npm run build:server && npm run build:gateway:web && node scripts/test_gateway_browser.cjs"
   },
   "repository": "git@github.com:0xcaff/codex-web.git",
   "author": "martin <martincharles07@gmail.com>",
   "license": "MIT",
   "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/ios": "8.5.2",
     "@electron/asar": "^4.2.0",
     "@fastify/multipart": "^10.0.0",
     "@fastify/static": "^9.1.1",
     "@tanstack/react-query": "^5.100.9",
     "@types/ws": "^8.18.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "better-sqlite3": "^12.9.0",
     "fastify": "^5.8.5",
     "glob": "^13.0.6",
@@ -53,11 +70,15 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.2",
     "@types/proxy-from-env": "^1.0.4",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "electron": "41.2.0",
     "http-server": "^14.1.1",
     "playwright": "^1.58.2"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

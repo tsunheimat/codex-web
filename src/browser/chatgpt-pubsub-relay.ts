@@ -1,6 +1,7 @@
 import { ChatGptPubsubRecoveryTracker } from "./chatgpt-pubsub-recovery";
 import { currentConversationIdFromBrowserPath } from "./routes";
 
+import { backendWebSocketUrl } from "./server-config";
 const CHATGPT_PUBSUB_RELAY_PATH = "/__backend/chatgpt-pubsub";
 const CHATGPT_PUBSUB_RELAY_PROTOCOL_PREFIX = "codex-web-chatgpt-pubsub.";
 const CHATGPT_PUBSUB_MAX_TARGET_LENGTH = 8 * 1024;
@@ -67,8 +68,7 @@ function createChatGptPubsubRelayConnection(
     return null;
   }
 
-  const relayUrl = new URL(CHATGPT_PUBSUB_RELAY_PATH, window.location.href);
-  relayUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const relayUrl = backendWebSocketUrl(CHATGPT_PUBSUB_RELAY_PATH);
   relayUrl.hash = "";
   relayUrl.search = "";
   return {

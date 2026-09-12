@@ -1,4 +1,11 @@
 import { installChatGptPubsubRelay } from "./chatgpt-pubsub-relay";
+import { backendUrl, backendWebSocketUrl } from "./server-config";
+
+// Used by the small upstream local-file URL patch, including image src URLs.
+Object.defineProperty(globalThis, "__CODEX_WEB_BACKEND_URL__", {
+  value: (route: string) => backendUrl(route).href,
+  configurable: true,
+});
 import {
   currentThreadIdFromBrowserPath,
   mapBrowserPathToInitialRoute,
@@ -386,9 +393,7 @@ function ensureSocket(): void {
     return;
   }
 
-  const nextSocket = new WebSocket(
-    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/__backend/ipc`,
-  );
+  const nextSocket = new WebSocket(backendWebSocketUrl("/__backend/ipc"));
   socket = nextSocket;
   socketReady = false;
   nextSocket.addEventListener("open", () => {

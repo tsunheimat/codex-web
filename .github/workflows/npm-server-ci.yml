@@ -36,6 +36,12 @@ jobs:
       - name: Build server
         run: npm run build:server
 
+      - name: Build independent web and mobile client
+        run: npm run build:gateway:web
+
+      - name: Test persistent gateway and backend isolation
+        run: node --test test/gateway-*.test.cjs
+
       - name: Run focused non-browser tests
         run: |
           node --test \

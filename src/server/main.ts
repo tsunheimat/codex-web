@@ -18,6 +18,7 @@ import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
 import { glob } from "glob";
 import { cacheControlForResponse } from "./cache-policy";
+import { originAllowed } from "./http-origins";
 import {
   CHATGPT_PUBSUB_RELAY_PATH,
   ChatGptPubsubRelay,
@@ -482,6 +483,19 @@ function createServerCleanupAuthority({
 }
 
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
+  const ownership = process.env.CODEX_WEB_RUNTIME_OWNERSHIP;
+  if (ownership && ownership !== "owned" && ownership !== "external")
+    throw new Error("CODEX_WEB_RUNTIME_OWNERSHIP must be owned or external");
+  const ownsAppServerRuntime = ownership
+    ? ownership === "owned"
+    : !process.env.CODEX_UNIX_SOCKET?.trim();
+  const allowedOrigins = (process.env.CODEX_WEB_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  for (const origin of allowedOrigins)
+    if (new URL(origin).origin !== origin)
+      throw new Error("CODEX_WEB_ALLOWED_ORIGINS requires exact origins");
   const allowAnyProject = parseAllowAnyProject(
     process.env.CODEX_WEBUI_ALLOW_ANY_PROJECT,
   );
@@ -503,9 +517,27 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     uploadQuotaBytes,
     projectBrowseRoot,
   );
-  const ownsAppServerRuntime = !process.env.CODEX_UNIX_SOCKET?.trim();
   const bridgeState = getIpcMainBridgeState();
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (request, reply) => {
+    if (
+      !request.url.startsWith("/__backend/") &&
+      !request.url.startsWith("/@fs/")
+    )
+      return;
+    const origin = request.headers.origin;
+    if (!originAllowed(origin, request.headers.host, allowedOrigins))
+      return reply.code(403).send({ error: "Origin not allowed" });
+    if (origin)
+      reply
+        .header("Access-Control-Allow-Origin", origin)
+        .header("Access-Control-Allow-Credentials", "true")
+        .header("Vary", "Origin")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Expose-Headers", "Content-Disposition");
+    if (request.method === "OPTIONS") return reply.code(204).send();
+  });
   const websocketServer = new WebSocketServer({ noServer: true });
   const chatGptPubsubRelay = new ChatGptPubsubRelay();
   const serverEpoch = randomUUID();
@@ -644,6 +676,16 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   });
 
   app.server.on("upgrade", (request, socket, head) => {
+    if (
+      !originAllowed(
+        request.headers.origin,
+        request.headers.host,
+        allowedOrigins,
+      )
+    ) {
+      socket.destroy();
+      return;
+    }
     const requestUrl = request.url ?? "/";
     const host = request.headers.host ?? "localhost";
     const url = new URL(requestUrl, `http://${host}`);
