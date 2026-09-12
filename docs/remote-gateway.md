@@ -58,8 +58,11 @@ Transport settings and SSH keys are server-side configuration, never frontend
 input. Backends connect independently, so an unavailable computer does not block
 the session picker.
 
-**Existing app-server over TLS**, including a Desktop-owned endpoint when one is
-actually available:
+**Running Windows Desktop:** use the distinct `desktop` transport and
+[Windows bridge launch instructions](remote-desktop.md). It attaches to the
+existing Desktop through local pipes and connects outbound to this gateway.
+
+**Existing app-server over TLS:**
 
 ```json
 {
@@ -355,25 +358,15 @@ WebSocket, Unix-socket and SSH-WebSocket backends do not acquire a filesystem/PT
 channel merely by connecting. Their file/terminal controls are disabled. There is
 no fallback to gateway-local paths for those targets.
 
-## Desktop capability validation still required
+## Remote Desktop adapter
 
-This iteration can control the host side of OpenAI's official device relay
-through the app-server's `remoteControl/*` methods, but it does not implement a
-replacement client for that relay. It also does not implement Remodex-style
-private Desktop IPC, native ChatGPT completion ownership, or native computer-use
-services. The gateway explicitly reports ChatGPT and Computer Use as unavailable.
-The old renderer remains useful for its existing supported workflows.
-
-Before enabling a future Desktop connector, test on the user's actual OS and
-installed runtime:
-
-1. Attach to and control an existing Desktop-owned conversation.
-2. Upload a photo through the real native ChatGPT path and finish the response.
-3. Close every viewer during that response and return to the saved result.
-4. Run a native computer-use task with the host's screen/accessibility permissions.
-5. Restart only the gateway, disconnect the host link, and revisit pending approvals.
-
-Do not enable these capabilities based only on a successful app-server handshake.
+The `desktop` transport uses `DesktopConnection`, separate from `AppServerConnection`.
+The [Windows bridge](remote-desktop.md) attaches to the already-running Desktop;
+it never starts an app-server, companion, or replacement runtime. Native ChatGPT
+text and history use Desktop's app-tools handlers. Native upload and Computer Use
+control gaps name the exact renderer/helper interfaces in the protocol reference.
+Bridge validation covers its own routing, framing, approvals, TLS and reconnect
+behavior. It does not require retesting the user's established native features.
 
 ## Validation
 

@@ -5,6 +5,7 @@ export type BackendSummary = {
   transport: string;
   connected: boolean;
   runtimeOwnership: string;
+  desktop?: { version: string; packageVersion?: string };
   capabilities: {
     codex: boolean;
     files: boolean;
@@ -12,6 +13,9 @@ export type BackendSummary = {
     chatgpt: boolean;
     computerUse: boolean;
     remoteControl: boolean;
+    attachments?: boolean;
+    chatgptAttachments?: boolean;
+    createConversation?: boolean;
   };
 };
 

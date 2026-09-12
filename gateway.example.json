@@ -16,6 +16,15 @@
       }
     },
     {
+      "id": "windows-desktop",
+      "label": "Windows Codex Desktop",
+      "cwd": "C:\\Users\\me\\projects",
+      "transport": {
+        "type": "desktop",
+        "agentTokenEnv": "CODEX_WEB_DESKTOP_AGENT_TOKEN"
+      }
+    },
+    {
       "id": "my-computer-companion",
       "label": "My computer (outbound companion)",
       "cwd": "/home/me/projects",

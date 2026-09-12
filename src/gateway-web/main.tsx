@@ -239,7 +239,7 @@ function App() {
       throw error;
     }
   };
-  const create = (threadId?: string) =>
+  const create = (threadId?: string, conversationKind = "codex") =>
     handle(async () => {
       setBusy(true);
       try {
@@ -249,7 +249,11 @@ function App() {
           body: {
             clientCommandId: crypto.randomUUID(),
             backendId,
-            ...(threadId ? { threadId } : {}),
+            ...(threadId
+              ? conversationKind === "chatgpt"
+                ? { conversationKind, conversationId: threadId }
+                : { threadId }
+              : {}),
           },
         });
       } finally {
@@ -259,6 +263,8 @@ function App() {
   const send = (method = "turn/start") =>
     handle(async () => {
       if (!selected || !client) return;
+      const native = state?.snapshot?.conversationKind === "chatgpt";
+      if (native) method = "chatgpt/send";
       if (method !== "turn/interrupt" && !text.trim() && !attachments.length)
         throw new Error("Enter a message or attach a file before sending");
       setBusy(true);
@@ -274,8 +280,9 @@ function App() {
               : { type: "text", text: `Attached file on this host: ${a.path}` },
           ),
         ];
-        const params =
-          method === "turn/interrupt"
+        const params = native
+          ? { prompt: text.trim() }
+          : method === "turn/interrupt"
             ? { turnId: active?.id }
             : {
                 input,
@@ -353,6 +360,25 @@ function App() {
     (t: any) => t.status === "inProgress",
   );
   const current = state?.snapshot?.id === selected ? state.snapshot : null;
+  const canAttach =
+    current?.conversationKind === "chatgpt"
+      ? backend?.capabilities.chatgptAttachments
+      : backend?.capabilities.attachments || backend?.capabilities.files;
+  const openExisting = () =>
+    handle(async () => {
+      if (!client) return;
+      const codex = await client.request(
+        `api/v1/backends/${backendId}/threads`,
+      );
+      const native = backend?.capabilities.chatgpt
+        ? await client.request(
+            `api/v1/backends/${backendId}/threads?kind=chatgpt`,
+          )
+        : { data: [] };
+      setThreads([...(codex.data ?? []), ...(native.data ?? [])]);
+      setPanel("import");
+      setMenu(false);
+    });
 
   if (!client)
     return (
@@ -450,26 +476,17 @@ function App() {
         </label>
         <button
           className="new-session"
-          onClick={() => void create()}
+          onClick={() =>
+            void (backend?.transport === "desktop" ? openExisting() : create())
+          }
           disabled={!backendId || busy || !!outbox}
         >
-          + New conversation
+          {backend?.transport === "desktop"
+            ? "Open Desktop conversation"
+            : "+ New conversation"}
         </button>
         <div className="sidebar-tools">
-          <button
-            onClick={() =>
-              void handle(async () => {
-                setThreads(
-                  (await client.request(`api/v1/backends/${backendId}/threads`))
-                    .data ?? [],
-                );
-                setPanel("import");
-                setMenu(false);
-              })
-            }
-          >
-            Existing threads
-          </button>
+          <button onClick={() => void openExisting()}>Existing threads</button>
           <button
             disabled={!backend?.capabilities.files}
             onClick={() => void showFiles()}
@@ -547,8 +564,15 @@ function App() {
           </button>
           <div>
             <h2>{current?.title ?? backend?.label ?? "Choose a computer"}</h2>
-            <p className="muted host-path">{current?.cwd ?? backend?.cwd}</p>
+            <p className="muted host-path">
+              {current?.conversationKind === "chatgpt"
+                ? "ChatGPT on Desktop"
+                : (current?.cwd ?? backend?.cwd)}
+            </p>
           </div>
+          {backend?.desktop && (
+            <small className="muted">Desktop {backend.desktop.version}</small>
+          )}
           <span className="status-pill">
             {current
               ? statusLabel(current.status)
@@ -654,9 +678,10 @@ function App() {
               threads.map((t) => (
                 <button
                   className="file-row"
-                  key={t.id}
-                  onClick={() => void create(t.id)}
+                  key={`${t.conversationKind ?? "codex"}:${t.id}`}
+                  onClick={() => void create(t.id, t.conversationKind)}
                 >
+                  {t.conversationKind === "chatgpt" ? "ChatGPT · " : ""}
                   {t.name || t.preview || t.id}
                 </button>
               ))}
@@ -709,23 +734,51 @@ function App() {
             <button
               className="primary"
               disabled={!backendId || busy || !!outbox}
-              onClick={() => void create()}
+              onClick={() =>
+                void (backend?.transport === "desktop"
+                  ? openExisting()
+                  : create())
+              }
             >
-              New conversation
+              {backend?.transport === "desktop"
+                ? "Open Desktop conversation"
+                : "New conversation"}
             </button>
           </section>
         ) : (
           <>
             <section className="conversation" aria-label="Conversation">
-              {(current.thread?.turns ?? []).map((turn: any) => (
+              {(
+                current.nativeConversation?.turns ??
+                current.thread?.turns ??
+                []
+              ).map((turn: any) => (
                 <React.Fragment key={turn.id}>
                   {(turn.items ?? []).map((item: any, index: number) => (
-                    <Message key={item.id ?? index} item={item} />
+                    <Message
+                      key={item.id ?? index}
+                      item={item}
+                      native={current.conversationKind === "chatgpt"}
+                    />
                   ))}
                   {turn.error && <p className="error">{turn.error.message}</p>}
                 </React.Fragment>
               ))}
-              {!current.thread?.turns?.length && (
+              {current.thread?.historyTruncated && (
+                <p className="muted">
+                  Showing recent Desktop history. Earlier history and full
+                  output remain available in Desktop.
+                </p>
+              )}
+              {current.conversationKind === "chatgpt" && (
+                <p className="muted">
+                  ChatGPT on Desktop · Recent history refreshes automatically.
+                  Attachments and Computer Use controls are available in
+                  Desktop.
+                </p>
+              )}
+              {!(current.nativeConversation?.turns ?? current.thread?.turns)
+                ?.length && (
                 <p className="muted start-hint">
                   What would you like to work on?
                 </p>
@@ -756,9 +809,11 @@ function App() {
               <textarea
                 aria-label="Message"
                 placeholder={
-                  activeTurn
-                    ? "Add guidance while your task runs…"
-                    : "Send a task to this computer…"
+                  current.conversationKind === "chatgpt"
+                    ? "Send a message to ChatGPT…"
+                    : activeTurn
+                      ? "Add guidance while your task runs…"
+                      : "Send a task to this computer…"
                 }
                 value={text}
                 onChange={(e) => {
@@ -793,13 +848,18 @@ function App() {
               </div>
               <div className="composer-actions">
                 <label
-                  className={`attach ${!backend?.capabilities.files || busy ? "disabled" : ""}`}
+                  className={`attach ${!canAttach || busy ? "disabled" : ""}`}
                 >
                   + Attach
                   <input
                     type="file"
                     multiple
-                    disabled={!backend?.capabilities.files || busy}
+                    accept={
+                      backend?.transport === "desktop"
+                        ? "image/png,image/jpeg,image/gif,image/webp"
+                        : undefined
+                    }
+                    disabled={!canAttach || busy}
                     onChange={(e) => {
                       const files = Array.from(e.target.files ?? []);
                       e.target.value = "";
@@ -807,6 +867,13 @@ function App() {
                         setBusy(true);
                         try {
                           for (const file of files) {
+                            if (
+                              backend?.transport === "desktop" &&
+                              file.size > 5 * 1024 * 1024
+                            )
+                              throw new Error(
+                                "Desktop image upload exceeds 5 MiB",
+                              );
                             const result = await client.upload(
                               backendId,
                               file,
@@ -846,8 +913,10 @@ function App() {
                   disabled={
                     busy ||
                     !!outbox ||
+                    (current.conversationKind === "chatgpt" &&
+                      current.status === "running") ||
                     (!text.trim() && !attachments.length) ||
-                    !current.threadId
+                    (!current.threadId && !current.conversationId)
                   }
                 >
                   {activeTurn ? "Guide task ↑" : "Send ↑"}
@@ -861,7 +930,7 @@ function App() {
   );
 }
 
-function Message({ item }: { item: any }) {
+function Message({ item, native = false }: { item: any; native?: boolean }) {
   if (item.type === "userMessage")
     return (
       <article className="message user">
@@ -881,7 +950,7 @@ function Message({ item }: { item: any }) {
   if (item.type === "agentMessage")
     return (
       <article className="message assistant">
-        <p className="message-role">CODEX</p>
+        <p className="message-role">{native ? "CHATGPT" : "CODEX"}</p>
         <div className="message-text">{item.text}</div>
       </article>
     );

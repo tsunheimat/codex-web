@@ -99,7 +99,7 @@ export async function createGateway(
   }));
   app.get("/api/v1/backends", async () => service.summaries());
   app.get("/api/v1/backends/:id/threads", async (request: any) =>
-    service.listThreads(request.params.id),
+    service.listThreads(request.params.id, request.query.kind ?? "codex"),
   );
   app.get("/api/v1/backends/:id/remote-control", async (request: any) =>
     service.remoteControl(request.params.id, "status/read"),
@@ -163,7 +163,7 @@ export async function createGateway(
     return service.store.sync(request.params.id, 0);
   });
   app.post("/api/v1/approvals/:id", async (request: any) => {
-    service.answer(request.params.id, request.body);
+    await service.answer(request.params.id, request.body);
     return { ok: true };
   });
   app.get("/api/v1/backends/:id/files", async (request: any) =>
@@ -174,17 +174,29 @@ export async function createGateway(
   );
   app.post("/api/v1/backends/:id/uploads", async (request: any, reply) => {
     const b = request.body;
+    const desktop =
+      service.backend(request.params.id).transport.type === "desktop";
+    const uploadLimit = desktop ? 5 * 1024 * 1024 : MAX_UPLOAD_BYTES;
     if (
       !b ||
       typeof b.name !== "string" ||
       b.name.length > 255 ||
       typeof b.data !== "string" ||
-      b.data.length > Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 ||
+      b.data.length > Math.ceil(uploadLimit / 3) * 4 ||
       !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
         b.data,
       )
     )
-      return reply.code(400).send({ error: "Invalid upload (maximum 10 MiB)" });
+      return reply
+        .code(400)
+        .send({
+          error: `Invalid upload (maximum ${uploadLimit / 1024 / 1024} MiB)`,
+        });
+    if (desktop)
+      return service.desktopUpload(request.params.id, b.sessionId, {
+        name: b.name,
+        data: b.data,
+      });
     return hostFileOperation(request.params.id, b.sessionId, {
       action: "upload",
       name: b.name,
@@ -220,7 +232,7 @@ export async function createGateway(
   }
   app.server.on("upgrade", (request, socket, head) => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
-    if (pathname === "/api/v1/agent") {
+    if (pathname === "/api/v1/agent" || pathname === "/api/v1/desktop") {
       if (sockets.size + agents.size >= 64) {
         socket.destroy();
         return;
@@ -246,8 +258,20 @@ export async function createGateway(
       wss.emit("connection", ws, request),
     );
   });
-  agentWss.on("connection", (socket: WebSocket) => {
+  agentWss.on("connection", (socket: WebSocket, request: IncomingMessage) => {
     agents.add(socket);
+    let alive = true;
+    const heartbeat = setInterval(() => {
+      if (!alive) socket.terminate();
+      else {
+        alive = false;
+        socket.ping();
+      }
+    }, 15000);
+    heartbeat.unref();
+    socket.on("pong", () => {
+      alive = true;
+    });
     const handshake = setTimeout(
       () => socket.close(1008, "Authentication timed out"),
       5000,
@@ -262,17 +286,60 @@ export async function createGateway(
         socket.close(1008, "Invalid handshake");
         return;
       }
+      const desktop = request.url?.split("?")[0] === "/api/v1/desktop";
       const expected =
         typeof hello?.backendId === "string"
-          ? service.companionToken(hello.backendId)
+          ? desktop
+            ? service.desktopToken(hello.backendId)
+            : service.companionToken(hello.backendId)
           : null;
       if (
-        hello?.type !== "agent-authenticate" ||
+        hello?.type !==
+          (desktop ? "desktop-authenticate" : "agent-authenticate") ||
         hello.version !== 1 ||
         !expected ||
         !tokenMatches(expected, hello.token)
       ) {
         socket.close(1008, "Authentication or protocol mismatch");
+        return;
+      }
+      if (desktop) {
+        if (
+          typeof hello.desktop?.version !== "string" ||
+          !/^[\w.+-]{1,64}$/.test(hello.desktop.version) ||
+          hello.capabilities?.codex !== true
+        ) {
+          socket.close(1008, "Invalid Desktop capabilities");
+          return;
+        }
+        const capabilities = Object.fromEntries(
+          [
+            "codex",
+            "chatgpt",
+            "attachments",
+            "chatgptAttachments",
+            "computerUse",
+            "createConversation",
+          ].map((k) => [k, hello.capabilities[k] === true]),
+        );
+        void service
+          .attachDesktop(hello.backendId, socket, {
+            desktop: {
+              version: hello.desktop.version,
+              packageVersion:
+                typeof hello.desktop.packageVersion === "string"
+                  ? hello.desktop.packageVersion.slice(0, 64)
+                  : undefined,
+            },
+            capabilities,
+          })
+          .catch(() =>
+            socket.close(
+              1008,
+              "Desktop bridge is already registered or unavailable",
+            ),
+          );
+        socket.send(JSON.stringify({ type: "desktop-ready", version: 1 }));
         return;
       }
       socket.send(JSON.stringify({ type: "agent-ready", version: 1 }));
@@ -289,6 +356,7 @@ export async function createGateway(
     socket.on("error", () => {});
     socket.on("close", () => {
       clearTimeout(handshake);
+      clearInterval(heartbeat);
       agents.delete(socket);
     });
   });

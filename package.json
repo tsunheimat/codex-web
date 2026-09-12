@@ -8,12 +8,17 @@
     "src/server/**/*.js",
     "src/server/electron/index.js",
     "scripts/codex_web_companion.cjs",
+    "scripts/codex_web_desktop_bridge.cjs",
+    "scripts/desktop/**/*.cjs",
+    "docs/remote-desktop.md",
+    "docs/desktop-protocol-reference.md",
     "!**/*.ts"
   ],
   "bin": {
     "codex-web": "src/server/main.js",
     "codex-web-gateway": "src/server/gateway/main.js",
-    "codex-web-companion": "scripts/codex_web_companion.cjs"
+    "codex-web-companion": "scripts/codex_web_companion.cjs",
+    "codex-web-desktop-bridge": "scripts/codex_web_desktop_bridge.cjs"
   },
   "scripts": {
     "prepare": "./scripts/prepare && npm run build:browser && npm run build:server",
@@ -36,6 +41,10 @@
     "test:terminal": "node scripts/test_terminal_pty.cjs",
     "build:gateway:web": "tsc -p src/gateway-web/tsconfig.json && vite build --config vite.gateway.config.ts",
     "gateway": "node src/server/gateway/main.js",
+    "desktop:bridge": "node scripts/codex_web_desktop_bridge.cjs",
+    "test:desktop": "node node_modules/typescript/bin/tsc -p src/server && node --test test/gateway-desktop.test.cjs",
+    "test:desktop:live": "node node_modules/typescript/bin/tsc -p src/server && node scripts/test_desktop_bridge_live.cjs",
+    "test:desktop:browser": "node scripts/test_gateway_desktop_browser.cjs",
     "dev:gateway:web": "vite --config vite.gateway.config.ts",
     "test:gateway": "npm run build:server && node --test test/gateway-*.test.cjs",
     "mobile:sync": "npm run build:gateway:web && cap sync",

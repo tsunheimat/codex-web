@@ -15,6 +15,7 @@ export type Backend = {
     | { type: "stdio"; command: string; args: string[] }
     | { type: "websocket"; url: string; tokenEnv?: string }
     | { type: "unix"; socketPath: string }
+    | { type: "desktop"; agentTokenEnv: string }
     | { type: "ssh"; ssh: SshOptions; command: string; args: string[] }
     | {
         type: "ssh-websocket";
@@ -207,6 +208,19 @@ export function parseConfig(input: unknown, token: string): GatewayConfig {
           agentTokenEnv: requiredTokenEnvironment(t.agentTokenEnv),
           command,
           args,
+        };
+        break;
+      }
+      case "desktop": {
+        if (
+          Object.keys(t).some((key) => !["type", "agentTokenEnv"].includes(key))
+        )
+          throw new Error(
+            "Desktop transport accepts only agentTokenEnv; it cannot launch a runtime",
+          );
+        transport = {
+          type: "desktop",
+          agentTokenEnv: requiredTokenEnvironment(t.agentTokenEnv),
         };
         break;
       }

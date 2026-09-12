@@ -49,7 +49,10 @@ export class AppServerConnection extends EventEmitter {
         new DeliveryUnknownError("Connection owner has shut down"),
       );
     if (this.connected) return Promise.resolve();
-    if (this.backend.transport.type === "companion")
+    if (
+      this.backend.transport.type === "companion" ||
+      this.backend.transport.type === "desktop"
+    )
       return Promise.reject(
         new DeliveryUnknownError("Execution companion is not connected"),
       );

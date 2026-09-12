@@ -7,6 +7,7 @@ import {
 } from "./connection";
 import { type Backend } from "./config";
 import { SessionStore, type Session, type Command } from "./store";
+import { DesktopConnection } from "./desktop";
 
 function conflict(message: string): Error {
   return Object.assign(new Error(message), { statusCode: 409 });
@@ -30,10 +31,18 @@ function statusFromThread(thread: any): string {
   const active = thread?.turns?.find((t: any) => t.status === "inProgress");
   return active ? "running" : (thread?.turns?.at(-1)?.status ?? "ready");
 }
+function nativeStatus(conversation: any): string {
+  if (conversation?.thread?.status?.type === "active") return "running";
+  if (conversation?.thread?.status?.type === "systemError") return "failed";
+  return statusFromThread({ turns: conversation?.turns });
+}
 
 /** Application commands and event ownership, independent of HTTP/WS viewers. */
 export class SessionService extends EventEmitter {
-  readonly connections = new Map<string, AppServerConnection>();
+  readonly connections = new Map<
+    string,
+    AppServerConnection | DesktopConnection
+  >();
   private stopped = false;
   private closePromise: Promise<void> | null = null;
   private reconnectTimers = new Map<string, NodeJS.Timeout>();
@@ -43,12 +52,16 @@ export class SessionService extends EventEmitter {
   constructor(
     readonly store: SessionStore,
     readonly backends: Backend[],
-    factory = (backend: Backend) => new AppServerConnection(backend),
+    factory = (backend: Backend): AppServerConnection | DesktopConnection =>
+      backend.transport.type === "desktop"
+        ? new DesktopConnection(backend)
+        : new AppServerConnection(backend),
   ) {
     super();
     for (const backend of backends) {
       const connection = factory(backend);
       this.connections.set(backend.id, connection);
+      connection.on("connected", () => this.emit("backends"));
       connection.on("notification", (message) =>
         this.onNotification(backend.id, message),
       );
@@ -95,9 +108,11 @@ export class SessionService extends EventEmitter {
       connected: this.connections.get(b.id)!.connected,
       runtimeOwnership: ["stdio", "ssh"].includes(b.transport.type)
         ? "gateway-channel"
-        : b.transport.type === "companion"
-          ? "companion"
-          : "external",
+        : b.transport.type === "desktop"
+          ? "desktop"
+          : b.transport.type === "companion"
+            ? "companion"
+            : "external",
       capabilities: {
         codex: this.connections.get(b.id)!.connected,
         remoteControl: this.connections.get(b.id)!.connected,
@@ -105,12 +120,34 @@ export class SessionService extends EventEmitter {
         computerUse: false,
         files: ["stdio", "ssh", "companion"].includes(b.transport.type),
         terminal: ["stdio", "ssh"].includes(b.transport.type),
+        ...(b.transport.type === "desktop"
+          ? {
+              ...(this.connections.get(b.id) as DesktopConnection).info
+                ?.capabilities,
+              codex: this.connections.get(b.id)!.connected,
+              chatgpt:
+                this.connections.get(b.id)!.connected &&
+                (this.connections.get(b.id) as DesktopConnection).info
+                  ?.capabilities?.chatgpt === true,
+              attachments: this.connections.get(b.id)!.connected,
+              files: false,
+              terminal: false,
+              remoteControl: false,
+            }
+          : {}),
       },
+      ...(b.transport.type === "desktop"
+        ? {
+            desktop: (this.connections.get(b.id) as DesktopConnection).info
+              ?.desktop,
+          }
+        : {}),
     }));
   }
   start(): void {
     for (const b of this.backends)
-      if (b.transport.type !== "companion") this.track(this.warm(b.id));
+      if (!["companion", "desktop"].includes(b.transport.type))
+        this.track(this.warm(b.id));
   }
   private track(promise: Promise<void>): void {
     this.running.add(promise);
@@ -135,6 +172,8 @@ export class SessionService extends EventEmitter {
     }
   }
   private scheduleReconnect(id: string): void {
+    if (["companion", "desktop"].includes(this.backend(id).transport.type))
+      return;
     if (this.stopped || this.reconnectTimers.has(id)) return;
     const timer = setTimeout(() => {
       this.reconnectTimers.delete(id);
@@ -181,21 +220,58 @@ export class SessionService extends EventEmitter {
     clientCommandId: string;
     backendId: string;
     threadId?: string;
+    conversationKind?: "codex" | "chatgpt";
+    conversationId?: string;
   }): Command {
     const backend = this.backend(input.backendId);
+    const kind = input.conversationKind ?? "codex";
+    if (
+      !["codex", "chatgpt"].includes(kind) ||
+      (kind === "chatgpt" &&
+        (backend.transport.type !== "desktop" ||
+          !validId(input.conversationId) ||
+          input.threadId !== undefined))
+    )
+      throw Object.assign(
+        new Error(
+          "Use a Desktop backend and native conversationId for ChatGPT",
+        ),
+        { statusCode: 400 },
+      );
+    if (kind === "codex" && input.conversationId !== undefined)
+      throw Object.assign(new Error("Use threadId for a Codex conversation"), {
+        statusCode: 400,
+      });
+    if (
+      backend.transport.type === "desktop" &&
+      kind === "codex" &&
+      !input.threadId
+    )
+      throw Object.assign(
+        new Error(
+          "Select an existing Desktop conversation. The follower interface does not create conversations.",
+        ),
+        { statusCode: 409 },
+      );
     if (input.threadId !== undefined && !validId(input.threadId))
       throw Object.assign(new Error("Invalid thread ID"), { statusCode: 400 });
     const digest = fingerprint({ method: "session/create", ...input });
     const existing = this.existing(input.clientCommandId, digest);
     if (existing) return existing;
-    const prior = input.threadId
-      ? this.store.findThread(backend.id, input.threadId)
+    const identity = kind === "chatgpt" ? input.conversationId : input.threadId;
+    const prior = identity
+      ? this.store.findConversation(backend.id, identity, kind)
       : undefined;
     const sessionId = prior?.id ?? randomUUID();
     const command: Command = {
       id: input.clientCommandId,
       sessionId,
-      method: input.threadId ? "thread/resume" : "thread/start",
+      method:
+        kind === "chatgpt"
+          ? "chatgpt/attach"
+          : input.threadId
+            ? "thread/resume"
+            : "thread/start",
       fingerprint: digest,
       state: "received",
     };
@@ -205,6 +281,10 @@ export class SessionService extends EventEmitter {
           id: sessionId,
           backendId: backend.id,
           threadId: input.threadId ?? null,
+          conversationKind: kind,
+          ...(kind === "chatgpt"
+            ? { conversationId: input.conversationId }
+            : {}),
           cwd: backend.cwd,
           title: "New conversation",
           status: "creating",
@@ -222,8 +302,46 @@ export class SessionService extends EventEmitter {
         this.record({ ...command, state: "dispatching" });
         const result = await connection.request(
           command.method,
-          input.threadId ? { threadId: input.threadId } : { cwd: backend.cwd },
+          kind === "chatgpt"
+            ? { conversationId: input.conversationId }
+            : input.threadId
+              ? { threadId: input.threadId }
+              : { cwd: backend.cwd },
         );
+        if (kind === "chatgpt") {
+          if (result?.conversationId !== input.conversationId)
+            throw new DeliveryUnknownError(
+              "Desktop returned the wrong native conversation identity",
+            );
+          this.change(
+            sessionId,
+            "session.created",
+            {},
+            {
+              nativeConversation: result.conversation,
+              status: nativeStatus(result.conversation),
+              connection: "connected",
+              title:
+                result.conversation?.title ??
+                result.conversation?.thread?.title ??
+                "ChatGPT conversation",
+            },
+          );
+          this.attached.set(
+            `${connection.epoch}:${sessionId}`,
+            Promise.resolve(),
+          );
+          this.record({
+            ...command,
+            state: "accepted",
+            result: {
+              sessionId,
+              conversationKind: kind,
+              conversationId: input.conversationId,
+            },
+          });
+          return;
+        }
         if (!validId(result?.thread?.id))
           throw new DeliveryUnknownError("Runtime returned no thread identity");
         this.change(
@@ -265,7 +383,14 @@ export class SessionService extends EventEmitter {
   ): Command {
     const session = this.store.get(sessionId);
     this.backend(session.backendId);
-    if (!["turn/start", "turn/steer", "turn/interrupt"].includes(input.method))
+    const native = session.conversationKind === "chatgpt";
+    if (
+      !(
+        native
+          ? ["chatgpt/send"]
+          : ["turn/start", "turn/steer", "turn/interrupt"]
+      ).includes(input.method)
+    )
       throw Object.assign(new Error("Unsupported command"), {
         statusCode: 400,
       });
@@ -280,8 +405,9 @@ export class SessionService extends EventEmitter {
         { statusCode: 400 },
       );
     // Do not expose arbitrary app-server configuration or policy overrides.
-    const allowed =
-      input.method === "turn/interrupt"
+    const allowed = native
+      ? ["prompt"]
+      : input.method === "turn/interrupt"
         ? ["turnId"]
         : input.method === "turn/steer"
           ? ["input", "expectedTurnId"]
@@ -291,6 +417,7 @@ export class SessionService extends EventEmitter {
         statusCode: 400,
       });
     if (
+      !native &&
       input.method !== "turn/interrupt" &&
       (!Array.isArray(params.input) ||
         params.input.length === 0 ||
@@ -307,10 +434,19 @@ export class SessionService extends EventEmitter {
       throw Object.assign(new Error("Provide text or host-local image input"), {
         statusCode: 400,
       });
+    if (
+      native &&
+      (typeof params.prompt !== "string" ||
+        !params.prompt.trim() ||
+        params.prompt.length > 200000)
+    )
+      throw Object.assign(new Error("Provide a native ChatGPT text prompt"), {
+        statusCode: 400,
+      });
     const digest = fingerprint({ sessionId, method: input.method, params });
     const existing = this.existing(input.clientCommandId, digest);
     if (existing) return existing;
-    if (!session.threadId)
+    if (!session.threadId && !session.conversationId)
       throw conflict("Wait for the runtime to create this conversation");
     const command: Command = {
       id: input.clientCommandId,
@@ -335,10 +471,16 @@ export class SessionService extends EventEmitter {
             -32600,
           );
         this.record({ ...command, state: "dispatching" });
-        const result = await connection.request(input.method, {
+        const requestParams = {
           ...params,
-          threadId: current.threadId,
-        });
+          ...(native
+            ? { conversationId: current.conversationId }
+            : { threadId: current.threadId }),
+        };
+        const result =
+          connection instanceof DesktopConnection
+            ? await connection.request(input.method, requestParams, command.id)
+            : await connection.request(input.method, requestParams);
         if (input.method === "turn/start" && result?.turn) {
           // A completed notification may arrive before the start acknowledgement.
           const latest = this.store.get(sessionId);
@@ -358,6 +500,7 @@ export class SessionService extends EventEmitter {
           });
         }
         this.record({ ...command, state: "accepted", result });
+        if (native) this.track(this.reconcile(sessionId));
       } catch (error) {
         this.failed(command, error);
       }
@@ -395,7 +538,7 @@ export class SessionService extends EventEmitter {
 
   private async attach(id: string): Promise<void> {
     const session = this.store.get(id);
-    if (!session.threadId) return;
+    if (!session.threadId && !session.conversationId) return;
     const connection = this.connections.get(session.backendId)!;
     await connection.connect();
     const key = `${connection.epoch}:${id}`;
@@ -403,9 +546,24 @@ export class SessionService extends EventEmitter {
     if (previous) return previous;
     const operation = (async () => {
       const seq = this.store.get(id).seq;
-      const result = await connection.request("thread/resume", {
-        threadId: session.threadId,
-      });
+      const native = session.conversationKind === "chatgpt";
+      const result = await connection.request(
+        native ? "chatgpt/attach" : "thread/resume",
+        native
+          ? { conversationId: session.conversationId }
+          : { threadId: session.threadId },
+      );
+      if (native) {
+        if (result?.conversationId !== session.conversationId)
+          throw new Error("Wrong native conversation returned by Desktop");
+        this.change(
+          id,
+          "session.attached",
+          {},
+          { connection: "connected", nativeConversation: result.conversation },
+        );
+        return;
+      }
       if (result?.thread?.id !== session.threadId)
         throw new Error("Wrong thread returned by runtime");
       const patch: Partial<Session> = {
@@ -432,8 +590,26 @@ export class SessionService extends EventEmitter {
 
   async reconcile(id: string): Promise<void> {
     const session = this.store.get(id);
-    if (!session.threadId) return;
+    if (!session.threadId && !session.conversationId) return;
     const connection = this.connections.get(session.backendId)!;
+    if (session.conversationKind === "chatgpt") {
+      const result = await connection.request("chatgpt/read", {
+        conversationId: session.conversationId,
+      });
+      if (result?.conversationId !== session.conversationId)
+        throw new Error("Wrong native conversation returned by Desktop");
+      this.change(
+        id,
+        "session.reconciled",
+        {},
+        {
+          nativeConversation: result.conversation,
+          connection: "connected",
+          status: nativeStatus(result.conversation),
+        },
+      );
+      return;
+    }
     for (let attempt = 0; attempt < 3; attempt++) {
       const seq = this.store.get(id).seq;
       const result = await connection.request("thread/read", {
@@ -461,9 +637,66 @@ export class SessionService extends EventEmitter {
     // The viewer already has the newer projection; completion will reconcile.
   }
 
-  async listThreads(id: string): Promise<any> {
+  async listThreads(id: string, kind = "codex"): Promise<any> {
     this.backend(id);
-    return this.connections.get(id)!.request("thread/list", { limit: 30 });
+    if (!["codex", "chatgpt"].includes(kind))
+      throw Object.assign(new Error("Invalid conversation kind"), {
+        statusCode: 400,
+      });
+    return this.connections
+      .get(id)!
+      .request(kind === "chatgpt" ? "chatgpt/list" : "thread/list", {
+        limit: 30,
+      });
+  }
+
+  desktopToken(id: string): string | null {
+    const t = this.backends.find((b) => b.id === id)?.transport;
+    if (t?.type !== "desktop") return null;
+    const token = process.env[t.agentTokenEnv];
+    return token && token.length >= 32 ? token : null;
+  }
+  async attachDesktop(
+    id: string,
+    socket: import("ws").WebSocket,
+    info: any,
+  ): Promise<void> {
+    const connection = this.connections.get(id);
+    if (!(connection instanceof DesktopConnection))
+      throw new Error("Backend is not Desktop");
+    connection.attachDesktop(socket, info);
+    this.emit("backends");
+    for (const session of this.store
+      .list()
+      .filter((s) => s.backendId === id && (s.threadId || s.conversationId))) {
+      try {
+        await this.attach(session.id);
+      } catch {
+        /* Keep cached history. */
+      }
+    }
+  }
+  async desktopUpload(
+    id: string,
+    sessionId: string,
+    params: any,
+  ): Promise<any> {
+    const session = this.store.get(sessionId),
+      connection = this.connections.get(id);
+    if (session.backendId !== id || !(connection instanceof DesktopConnection))
+      throw conflict("Select a Desktop session before uploading");
+    if (session.conversationKind === "chatgpt")
+      throw conflict(
+        "Native ChatGPT uploadChatGptConversationFile is not exposed by Desktop's local app-tools interface",
+      );
+    if (
+      typeof params.data !== "string" ||
+      params.data.length > Math.ceil((5 * 1024 * 1024) / 3) * 4
+    )
+      throw Object.assign(new Error("Desktop image upload exceeds 5 MiB"), {
+        statusCode: 400,
+      });
+    return connection.request("attachment/upload", params);
   }
 
   async remoteControl(
@@ -530,7 +763,10 @@ export class SessionService extends EventEmitter {
     initialize = true,
   ): Promise<void> {
     const connection = this.connections.get(id);
-    if (!connection || this.backend(id).transport.type !== "companion")
+    if (
+      !(connection instanceof AppServerConnection) ||
+      this.backend(id).transport.type !== "companion"
+    )
       throw Object.assign(new Error("Backend is not a companion target"), {
         statusCode: 409,
       });
@@ -547,7 +783,7 @@ export class SessionService extends EventEmitter {
     }
   }
 
-  answer(id: string, result: any): void {
+  answer(id: string, result: any): void | Promise<void> {
     const approval = this.store.approval(id);
     if (!approval || approval.state !== "pending")
       throw conflict("This request is no longer pending");
@@ -578,9 +814,15 @@ export class SessionService extends EventEmitter {
     // Claim synchronously before any I/O: only one device can answer.
     this.store.putApproval({ ...approval, state: "responding" });
     try {
-      connection.respond(approval.requestId, result);
+      const acknowledgement = connection.respond(approval.requestId, result);
       // Wait for serverRequest/resolved before declaring it answered.
       this.change(session.id, "approval.responding", { id });
+      if (acknowledgement instanceof Promise)
+        return acknowledgement.catch((error) => {
+          this.store.putApproval({ ...approval, state: "stale" });
+          this.change(session.id, "approval.stale", { id });
+          throw error;
+        });
     } catch (error) {
       this.store.putApproval({ ...approval, state: "stale" });
       this.change(session.id, "approval.stale", { id });
@@ -628,10 +870,52 @@ export class SessionService extends EventEmitter {
   private onNotification(backendId: string, message: any): void {
     if (this.stopped) return;
     const p = message.params ?? {};
+    if (message.method === "desktop/chatgpt/snapshot") {
+      const native = this.store.findConversation(
+        backendId,
+        p.conversationId,
+        "chatgpt",
+      );
+      if (native)
+        this.change(
+          native.id,
+          message.method,
+          {},
+          {
+            nativeConversation: p.conversation,
+            connection: "connected",
+            status: nativeStatus(p.conversation),
+          },
+        );
+      return;
+    }
     const threadId = p.threadId ?? p.thread?.id;
     if (typeof threadId !== "string") return;
     const session = this.store.findThread(backendId, threadId);
     if (!session) return;
+    if (message.method === "desktop/unavailable") {
+      this.store.staleApprovals(session.id);
+      this.change(
+        session.id,
+        message.method,
+        {},
+        { connection: "unavailable" },
+      );
+      return;
+    }
+    if (message.method === "desktop/snapshot") {
+      this.change(
+        session.id,
+        message.method,
+        {},
+        {
+          thread: p.thread,
+          status: statusFromThread(p.thread),
+          connection: "connected",
+        },
+      );
+      return;
+    }
     if (message.method === "serverRequest/resolved") {
       for (const a of this.store.approvals(session.id))
         if (a.requestId === p.requestId)

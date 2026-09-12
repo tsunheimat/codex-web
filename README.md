@@ -3,8 +3,11 @@
 The remote upgrade adds a standalone session gateway, local/WebSocket/Unix/SSH
 connectors, durable reconnect and command tracking, and a responsive client with
 Capacitor mobile packaging. See [Remote gateway setup](docs/remote-gateway.md).
-The existing renderer/server workflow below remains available. Native ChatGPT
-and Computer Use require a separately validated desktop integration.
+The existing renderer/server workflow below remains available.
+[Remote Desktop mode](docs/remote-desktop.md) attaches an outbound Windows bridge
+to the running Desktop, with Codex follower control and native ChatGPT text/history.
+Native ChatGPT uploads and remote Computer Use controls still need the specific
+Desktop interfaces documented there.
 
 a browser frontend for codex desktop, running on a machine you control.
 

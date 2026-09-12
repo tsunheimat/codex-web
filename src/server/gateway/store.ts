@@ -6,6 +6,9 @@ export type Session = {
   id: string;
   backendId: string;
   threadId: string | null;
+  conversationKind?: "codex" | "chatgpt";
+  conversationId?: string;
+  nativeConversation?: any;
   cwd: string;
   title: string;
   status: string;
@@ -103,6 +106,13 @@ export class SessionStore {
       .get(backend, thread);
     return row ? JSON.parse(String(row.data)) : undefined;
   }
+  findConversation(
+    backend: string,
+    id: string,
+    kind: "codex" | "chatgpt",
+  ): Session | undefined {
+    return this.findThread(backend, kind === "chatgpt" ? `chatgpt:${id}` : id);
+  }
   save(session: Session): void {
     this.db
       .prepare(
@@ -111,7 +121,9 @@ export class SessionStore {
       .run(
         session.id,
         session.backendId,
-        session.threadId,
+        session.conversationKind === "chatgpt"
+          ? `chatgpt:${session.conversationId}`
+          : session.threadId,
         JSON.stringify(session),
       );
   }
