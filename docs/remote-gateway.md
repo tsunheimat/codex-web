@@ -216,7 +216,12 @@ No wildcard origins are accepted. The last two entries are for the packaged iOS
 and Android clients. Do not configure Capacitor's `server.url` or unrestricted
 navigation: the native shell must load the bundled client assets. The first
 client bundle is approximately 67 KiB gzipped; terminal code loads only when the
-terminal panel opens. Session caches are rendered during reconnection.
+terminal panel opens. Session caches are rendered during reconnection. The same
+static bundle includes an installable PWA manifest and a shell service worker.
+The worker caches only same-origin static assets and navigation shells; API,
+WebSocket, upload, download, and terminal requests always go to the live
+gateway. A PWA install does not make background JavaScript reliable; accepted
+work continues because the gateway owns the session.
 
 ```bash
 # Generate the standard native projects on the development computer:

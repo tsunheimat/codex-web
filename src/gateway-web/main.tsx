@@ -63,6 +63,7 @@ function App() {
   const [threads, setThreads] = useState<any[]>([]);
   const [remote, setRemote] = useState<any>(null);
   const [outbox, setOutbox] = useState<any>(null);
+  const lastNotified = useRef<string | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const terminalEl = useRef<HTMLDivElement>(null);
   const backend = backends.find((b) => b.id === backendId);
@@ -108,6 +109,16 @@ function App() {
       const message = (event as CustomEvent).detail;
       if (message.type === "sync") {
         setState(message);
+        const status = message.snapshot?.status;
+        if (
+          document.hidden &&
+          status === "completed" &&
+          lastNotified.current !== message.snapshot.id
+        ) {
+          lastNotified.current = message.snapshot.id;
+          if ("Notification" in window && Notification.permission === "granted")
+            new Notification(message.snapshot.title || "Codex task completed");
+        }
         const serialized = JSON.stringify(message);
         if (serialized.length < 500_000)
           save(`${namespace}:snapshot:${message.snapshot.id}`, message);
@@ -135,6 +146,11 @@ function App() {
       client.close();
     };
   }, [client]);
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    if (!/^https?:$/.test(location.protocol)) return;
+    void navigator.serviceWorker.register("./sw.js").catch(() => {});
+  }, []);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [state?.snapshot?.seq]);
