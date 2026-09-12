@@ -103,7 +103,7 @@ export class SessionService extends EventEmitter {
         remoteControl: this.connections.get(b.id)!.connected,
         chatgpt: false,
         computerUse: false,
-        files: ["stdio", "ssh"].includes(b.transport.type),
+        files: ["stdio", "ssh", "companion"].includes(b.transport.type),
         terminal: ["stdio", "ssh"].includes(b.transport.type),
       },
     }));
@@ -500,6 +500,19 @@ export class SessionService extends EventEmitter {
         statusCode: 400,
       });
     return this.connections.get(id)!.request(`remoteControl/${action}`, value);
+  }
+
+  async companionControl(
+    id: string,
+    action: "list" | "read" | "upload",
+    params: Record<string, unknown>,
+  ): Promise<any> {
+    const backend = this.backend(id);
+    if (backend.transport.type !== "companion")
+      throw Object.assign(new Error("Backend is not a companion target"), {
+        statusCode: 409,
+      });
+    return this.connections.get(id)!.control(action, params);
   }
 
   companionToken(id: string): string | null {

@@ -102,6 +102,7 @@ computer:
 export CODEX_WEB_COMPANION_GATEWAY=wss://gateway.example.com
 export CODEX_WEB_COMPANION_BACKEND=my-computer-companion
 export CODEX_WEB_COMPANION_TOKEN='a-separate-random-agent-token'
+export CODEX_WEB_COMPANION_ROOT=/home/me/projects
 node scripts/codex_web_companion.cjs
 ```
 
@@ -113,6 +114,8 @@ marks its delivery unknown and reconciles from authoritative thread history.
 Set the gateway process's `CODEX_WEB_COMPANION_AGENT_TOKEN` to the same secret
 as the companion's `CODEX_WEB_COMPANION_TOKEN`, and keep both values outside
 the checked-in JSON configuration.
+`CODEX_WEB_COMPANION_ROOT` is the only workspace exposed to companion file
+operations; symlink escapes and paths outside it are rejected.
 
 **Codex over SSH stdio:**
 
@@ -323,7 +326,7 @@ An events client first sends `{ "type": "authenticate", "version": 1, "token":
 
 ## Files and terminals
 
-The `stdio` and `ssh` transports have explicit host channels for files and
+The `stdio`, `ssh`, and `companion` transports have explicit host channels for files and
 terminals. Python 3 is required on that host for files; tmux is required for
 terminals. Files are confined to the configured `cwd`, including checks against
 symlink escapes. Listings are bounded to 1,000 entries; uploads/downloads to

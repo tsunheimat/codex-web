@@ -39,7 +39,18 @@ test("outbound companion authenticates and exposes its local app-server", async 
     `ws://127.0.0.1:${app.server.address().port}/api/v1/agent`,
   );
   const messages = [];
-  socket.on("message", (raw) => messages.push(JSON.parse(String(raw))));
+  socket.on("message", (raw) => {
+    const message = JSON.parse(String(raw));
+    messages.push(message);
+    if (message.type === "companion-control")
+      socket.send(
+        JSON.stringify({
+          type: "companion-result",
+          requestId: message.requestId,
+          result: { root: "/home/me/project", entries: [] },
+        }),
+      );
+  });
   await new Promise((resolve, reject) => {
     socket.once("open", resolve);
     socket.once("error", reject);
@@ -74,6 +85,14 @@ test("outbound companion authenticates and exposes its local app-server", async 
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(service.connections.get("computer").connected, true);
   assert.equal(service.summaries()[0].runtimeOwnership, "companion");
+  assert.equal(service.summaries()[0].capabilities.files, true);
+  assert.deepEqual(
+    await service.companionControl("computer", "list", {
+      root: "/home/me/project",
+      path: ".",
+    }),
+    { root: "/home/me/project", entries: [] },
+  );
   const closed = new Promise((resolve) => socket.once("close", resolve));
   socket.close();
   await closed;

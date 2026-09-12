@@ -49,6 +49,19 @@ export async function createGateway(
       });
     return service.backendForSession(sessionId);
   };
+  const hostFileOperation = (
+    backendId: string,
+    sessionId: unknown,
+    request: Record<string, unknown>,
+  ): Promise<any> => {
+    const backend = backendForRequest(backendId, sessionId);
+    if (backend.transport.type === "companion")
+      return service.companionControl(backendId, request.action as any, {
+        ...request,
+        root: backend.cwd,
+      });
+    return fileOperation(backend, request);
+  };
   app.setErrorHandler((error: any, _request, reply) => {
     const status = error.statusCode ?? 500;
     reply.code(status).send({
@@ -154,13 +167,10 @@ export async function createGateway(
     return { ok: true };
   });
   app.get("/api/v1/backends/:id/files", async (request: any) =>
-    fileOperation(
-      backendForRequest(request.params.id, request.query.sessionId),
-      {
-        action: "list",
-        path: request.query.path ?? ".",
-      },
-    ),
+    hostFileOperation(request.params.id, request.query.sessionId, {
+      action: "list",
+      path: request.query.path ?? ".",
+    }),
   );
   app.post("/api/v1/backends/:id/uploads", async (request: any, reply) => {
     const b = request.body;
@@ -175,15 +185,16 @@ export async function createGateway(
       )
     )
       return reply.code(400).send({ error: "Invalid upload (maximum 10 MiB)" });
-    return fileOperation(backendForRequest(request.params.id, b.sessionId), {
+    return hostFileOperation(request.params.id, b.sessionId, {
       action: "upload",
       name: b.name,
       data: b.data,
     });
   });
   app.get("/api/v1/backends/:id/download", async (request: any, reply) => {
-    const result = await fileOperation(
-      backendForRequest(request.params.id, request.query.sessionId),
+    const result = await hostFileOperation(
+      request.params.id,
+      request.query.sessionId,
       {
         action: "read",
         path: request.query.path,

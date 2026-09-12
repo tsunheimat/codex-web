@@ -19,6 +19,11 @@ type Pending = {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 };
+type PendingControl = {
+  resolve: (value: any) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+};
 const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 
 /** One connection per configured backend, never per viewer. No RPC is replayed. */
@@ -30,6 +35,7 @@ export class AppServerConnection extends EventEmitter {
   private sendFrame: ((message: string) => void) | null = null;
   private shutdownTransport: (() => void) | null = null;
   private pending = new Map<string, Pending>();
+  private pendingControls = new Map<string, PendingControl>();
   constructor(
     readonly backend: Backend,
     private readonly timeoutMs = 30_000,
@@ -302,6 +308,35 @@ export class AppServerConnection extends EventEmitter {
     return this.rpc(method, params);
   }
 
+  async control(action: string, params: Record<string, unknown>): Promise<any> {
+    if (this.backend.transport.type !== "companion")
+      throw new DeliveryUnknownError(
+        "Backend has no companion control channel",
+      );
+    await this.connect();
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingControls.delete(requestId);
+        reject(new DeliveryUnknownError("Companion control request timed out"));
+      }, this.timeoutMs);
+      timer.unref();
+      this.pendingControls.set(requestId, { resolve, reject, timer });
+      try {
+        this.send({
+          type: "companion-control",
+          requestId,
+          action,
+          ...params,
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingControls.delete(requestId);
+        reject(error);
+      }
+    });
+  }
+
   private rpc(method: string, params: unknown): Promise<any> {
     if (this.pending.size >= 128)
       return Promise.reject(new Error("Backend request capacity exceeded"));
@@ -358,6 +393,15 @@ export class AppServerConnection extends EventEmitter {
       this.disconnect();
       return;
     }
+    if (message.type === "companion-result") {
+      const pending = this.pendingControls.get(message.requestId);
+      if (!pending) return;
+      this.pendingControls.delete(message.requestId);
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(String(message.error)));
+      else pending.resolve(message.result);
+      return;
+    }
     if (message.id !== undefined && typeof message.method !== "string") {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -402,6 +446,11 @@ export class AppServerConnection extends EventEmitter {
       );
     }
     this.pending.clear();
+    for (const p of this.pendingControls.values()) {
+      clearTimeout(p.timer);
+      p.reject(new DeliveryUnknownError("Companion disconnected"));
+    }
+    this.pendingControls.clear();
     this.emit("disconnected", this.epoch);
   }
 }
