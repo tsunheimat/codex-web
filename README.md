@@ -1,5 +1,11 @@
 # codex-web
 
+The remote upgrade adds a standalone session gateway, local/WebSocket/Unix/SSH
+connectors, durable reconnect and command tracking, and a responsive client with
+Capacitor mobile packaging. See [Remote gateway setup](docs/remote-gateway.md).
+The existing renderer/server workflow below remains available. Native ChatGPT
+and Computer Use require a separately validated desktop integration.
+
 a browser frontend for codex desktop, running on a machine you control.
 
 https://github.com/user-attachments/assets/0a33cbd8-741c-412c-9e75-46dfe9324596

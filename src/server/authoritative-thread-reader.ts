@@ -67,6 +67,7 @@ export function inProgressTurnIdsFromThreadReadResponse(
 export function createAuthoritativeThreadReader(
   invokeDesktop: DesktopInvoke,
   createRequestId: () => string = randomUUID,
+  hostId: string = "local",
 ): (threadId: string) => Promise<ReadonlySet<string>> {
   return async (threadId) => {
     if (!isValidRendererThreadId(threadId)) {
@@ -92,6 +93,7 @@ export function createAuthoritativeThreadReader(
         if (
           !isRecord(response) ||
           response.type !== "mcp-response" ||
+          (response.hostId !== undefined && response.hostId !== hostId) ||
           !isRecord(response.message) ||
           response.message.id !== requestId
         ) {
@@ -117,7 +119,7 @@ export function createAuthoritativeThreadReader(
           [
             {
               type: "mcp-request",
-              hostId: "local",
+              hostId,
               request: {
                 id: requestId,
                 method: "thread/read",

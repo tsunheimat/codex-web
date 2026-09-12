@@ -1,4 +1,5 @@
 import { emitRendererEvent, isRecord } from "./shim";
+import { backendUrl } from "./server-config";
 
 type CodexFetchMessage = {
   body?: string;
@@ -41,9 +42,9 @@ export async function downloadWorkspaceFileCopy({
   if (hostId !== "local") {
     throw new Error("Only local workspace files can be downloaded");
   }
-  const downloadUrl = new URL("/__backend/download", window.location.href);
+  const downloadUrl = backendUrl("/__backend/download");
   downloadUrl.searchParams.set("path", path);
-  const response = await fetch(downloadUrl);
+  const response = await fetch(downloadUrl, { credentials: "include" });
   if (!response.ok) {
     throw new Error(
       `Download failed: ${response.status} ${response.statusText}`,
@@ -140,7 +141,7 @@ async function uploadFiles(files: File[]) {
     return [];
   }
 
-  const uploadUrl = new URL("/__backend/upload", window.location.href);
+  const uploadUrl = backendUrl("/__backend/upload");
   const formData = new FormData();
 
   for (const file of files) {
@@ -148,6 +149,7 @@ async function uploadFiles(files: File[]) {
   }
 
   const response = await fetch(uploadUrl, {
+    credentials: "include",
     method: "POST",
     body: formData,
   });

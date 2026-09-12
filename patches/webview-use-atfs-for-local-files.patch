@@ -5,7 +5,7 @@
    });
  function wta(e) {
 -  return `${Dta}${Eta(e)}`;
-+  return Eta(e);
++  return globalThis.__CODEX_WEB_BACKEND_URL__?.(Eta(e)) ?? Eta(e);
  }
  function Tta(e) {
    return Eta(e);

@@ -109,6 +109,7 @@ test("relay close delivers ChatGPT recovery before the ordinary close listener",
     {
       "./chatgpt-pubsub-recovery": recovery,
       "./routes": routes,
+      "./server-config": compileTypeScriptModule("src/browser/server-config.ts", harness.window),
     },
   );
 

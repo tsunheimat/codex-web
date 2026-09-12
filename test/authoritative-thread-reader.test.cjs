@@ -76,3 +76,13 @@ test("thread/read validation rejects partial, mismatched and ambiguous snapshots
     );
   }
 });
+
+test("authoritative reader routes to the selected host and ignores another host's reply", async () => {
+  const reader = createAuthoritativeThreadReader(async (_channel, args, sink) => {
+    assert.equal(args[0].hostId, "my-desktop");
+    const id = args[0].request.id;
+    sink("codex_desktop:message-for-view", [response(id, "thread-a", [{ id: "wrong-host", status: "inProgress" }])]);
+    sink("codex_desktop:message-for-view", [{ ...response(id, "thread-a", [{ id: "right-host", status: "inProgress" }]), hostId: "my-desktop" }]);
+  }, () => "selected-host", "my-desktop");
+  assert.deepEqual([...(await reader("thread-a"))], ["right-host"]);
+});

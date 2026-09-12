@@ -1,0 +1,19 @@
+{
+  "host": "127.0.0.1",
+  "port": 8215,
+  "statePath": "/home/codex/.local/state/codex-web/gateway.sqlite",
+  "webRoot": "/opt/codex-web/scratch/gateway-web",
+  "allowedOrigins": [],
+  "backends": [
+    {
+      "id": "local",
+      "label": "Local computer",
+      "cwd": "/home/codex/projects",
+      "transport": {
+        "type": "stdio",
+        "command": "codex",
+        "args": ["app-server", "--listen", "stdio://"]
+      }
+    }
+  ]
+}

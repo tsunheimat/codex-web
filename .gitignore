@@ -1,3 +1,12 @@
 node_modules/
 scratch*/
 sentry
+src/server/**/*.js
+src/server/**/*.js.map
+src/server/**/*.d.ts
+src/server/**/*.d.ts.map
+android/
+ios/
+gateway.json
+*.sqlite
+*.sqlite-*
