@@ -22,6 +22,12 @@ export type Backend = {
         host: string;
         port: number;
         tokenEnv?: string;
+      }
+    | {
+        type: "companion";
+        agentTokenEnv: string;
+        command: string;
+        args: string[];
       };
 };
 export type GatewayConfig = {
@@ -99,6 +105,11 @@ function tokenEnvironment(value: unknown): { tokenEnv?: string } {
   if (typeof value !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(value))
     throw new Error("Invalid tokenEnv");
   return { tokenEnv: value };
+}
+function requiredTokenEnvironment(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(value))
+    throw new Error("Invalid agentTokenEnv");
+  return value;
 }
 
 export function parseConfig(input: unknown, token: string): GatewayConfig {
@@ -180,6 +191,22 @@ export function parseConfig(input: unknown, token: string): GatewayConfig {
           host,
           port: port(t.port),
           ...tokenEnvironment(t.tokenEnv),
+        };
+        break;
+      }
+      case "companion": {
+        const command = string(t.command ?? "codex", "command");
+        const args = t.args ?? ["app-server", "--listen", "stdio://"];
+        if (
+          !Array.isArray(args) ||
+          args.some((a) => typeof a !== "string" || /[\0\r\n]/.test(a))
+        )
+          throw new Error("Invalid command arguments");
+        transport = {
+          type: "companion",
+          agentTokenEnv: requiredTokenEnvironment(t.agentTokenEnv),
+          command,
+          args,
         };
         break;
       }

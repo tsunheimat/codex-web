@@ -217,3 +217,37 @@ test("startup marks ambiguous dispatch stale instead of replaying it", () => {
   store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("imported sessions retain the thread workspace for host operations", async (t) => {
+  const runtime = await new MockRuntime().listen();
+  const backend = {
+    id: "desktop",
+    label: "Desktop",
+    cwd: "/configured/default",
+    transport: { type: "websocket", url: runtime.url },
+  };
+  runtime.threads.set("thread-existing", {
+    id: "thread-existing",
+    cwd: "/selected/project",
+    turns: [],
+    preview: "Imported project",
+  });
+  const service = new SessionService(
+    new SessionStore(":memory:"),
+    [backend],
+    (b) => new AppServerConnection(b, 300),
+  );
+  t.after(async () => {
+    await service.close();
+    await runtime.close();
+  });
+  const command = service.create({
+    backendId: "desktop",
+    threadId: "thread-existing",
+    clientCommandId: randomUUID(),
+  });
+  await waitFor(() => service.store.command(command.id).state === "accepted");
+  const session = service.store.get(command.sessionId);
+  assert.equal(session.cwd, "/selected/project");
+  assert.equal(service.backendForSession(session.id).cwd, "/selected/project");
+});

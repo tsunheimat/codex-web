@@ -26,8 +26,29 @@ export async function createGateway(
     maxPayload: 64 * 1024,
     perMessageDeflate: false,
   });
+  const agentWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: 8 * 1024 * 1024,
+    perMessageDeflate: false,
+  });
   const terminals = new TerminalService();
   const sockets = new Set<WebSocket>();
+  const agents = new Set<WebSocket>();
+  const backendForRequest = (
+    backendId: string,
+    sessionId: unknown,
+  ): ReturnType<SessionService["backend"]> => {
+    if (sessionId === undefined || sessionId === null || sessionId === "")
+      return service.backend(backendId);
+    if (typeof sessionId !== "string")
+      throw Object.assign(new Error("Invalid session ID"), { statusCode: 400 });
+    const session = service.store.get(sessionId);
+    if (session.backendId !== backendId)
+      throw Object.assign(new Error("Session belongs to another backend"), {
+        statusCode: 409,
+      });
+    return service.backendForSession(sessionId);
+  };
   app.setErrorHandler((error: any, _request, reply) => {
     const status = error.statusCode ?? 500;
     reply.code(status).send({
@@ -66,6 +87,33 @@ export async function createGateway(
   app.get("/api/v1/backends", async () => service.summaries());
   app.get("/api/v1/backends/:id/threads", async (request: any) =>
     service.listThreads(request.params.id),
+  );
+  app.get("/api/v1/backends/:id/remote-control", async (request: any) =>
+    service.remoteControl(request.params.id, "status/read"),
+  );
+  app.post(
+    "/api/v1/backends/:id/remote-control/:action",
+    { bodyLimit: 16 * 1024 },
+    async (request: any) => {
+      const actions = new Set([
+        "enable",
+        "disable",
+        "pairing/start",
+        "pairing/status",
+        "client/list",
+        "client/revoke",
+      ]);
+      const action = String(request.params.action);
+      if (!actions.has(action))
+        throw Object.assign(new Error("Unsupported remote-control action"), {
+          statusCode: 400,
+        });
+      return service.remoteControl(
+        request.params.id,
+        action as any,
+        request.body,
+      );
+    },
   );
   app.get("/api/v1/sessions", async () =>
     service.store
@@ -106,10 +154,13 @@ export async function createGateway(
     return { ok: true };
   });
   app.get("/api/v1/backends/:id/files", async (request: any) =>
-    fileOperation(service.backend(request.params.id), {
-      action: "list",
-      path: request.query.path ?? ".",
-    }),
+    fileOperation(
+      backendForRequest(request.params.id, request.query.sessionId),
+      {
+        action: "list",
+        path: request.query.path ?? ".",
+      },
+    ),
   );
   app.post("/api/v1/backends/:id/uploads", async (request: any, reply) => {
     const b = request.body;
@@ -124,17 +175,20 @@ export async function createGateway(
       )
     )
       return reply.code(400).send({ error: "Invalid upload (maximum 10 MiB)" });
-    return fileOperation(service.backend(request.params.id), {
+    return fileOperation(backendForRequest(request.params.id, b.sessionId), {
       action: "upload",
       name: b.name,
       data: b.data,
     });
   });
   app.get("/api/v1/backends/:id/download", async (request: any, reply) => {
-    const result = await fileOperation(service.backend(request.params.id), {
-      action: "read",
-      path: request.query.path,
-    });
+    const result = await fileOperation(
+      backendForRequest(request.params.id, request.query.sessionId),
+      {
+        action: "read",
+        path: request.query.path,
+      },
+    );
     reply
       .type("application/octet-stream")
       .header("X-Content-Type-Options", "nosniff")
@@ -155,6 +209,16 @@ export async function createGateway(
   }
   app.server.on("upgrade", (request, socket, head) => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+    if (pathname === "/api/v1/agent") {
+      if (sockets.size + agents.size >= 64) {
+        socket.destroy();
+        return;
+      }
+      agentWss.handleUpgrade(request, socket, head, (ws) =>
+        agentWss.emit("connection", ws, request),
+      );
+      return;
+    }
     if (
       !["/api/v1/events", "/api/v1/terminal"].includes(pathname) ||
       !originAllowed(
@@ -170,6 +234,52 @@ export async function createGateway(
     wss.handleUpgrade(request, socket, head, (ws) =>
       wss.emit("connection", ws, request),
     );
+  });
+  agentWss.on("connection", (socket: WebSocket) => {
+    agents.add(socket);
+    const handshake = setTimeout(
+      () => socket.close(1008, "Authentication timed out"),
+      5000,
+    );
+    handshake.unref();
+    socket.once("message", (raw) => {
+      clearTimeout(handshake);
+      let hello: any;
+      try {
+        hello = JSON.parse(String(raw));
+      } catch {
+        socket.close(1008, "Invalid handshake");
+        return;
+      }
+      const expected =
+        typeof hello?.backendId === "string"
+          ? service.companionToken(hello.backendId)
+          : null;
+      if (
+        hello?.type !== "agent-authenticate" ||
+        hello.version !== 1 ||
+        !expected ||
+        !tokenMatches(expected, hello.token)
+      ) {
+        socket.close(1008, "Authentication or protocol mismatch");
+        return;
+      }
+      socket.send(JSON.stringify({ type: "agent-ready", version: 1 }));
+      void service
+        .attachCompanion(
+          hello.backendId,
+          socket,
+          hello.runtimeInitialized !== true,
+        )
+        .catch(() => {
+          socket.close(1011, "Companion initialization failed");
+        });
+    });
+    socket.on("error", () => {});
+    socket.on("close", () => {
+      clearTimeout(handshake);
+      agents.delete(socket);
+    });
   });
   wss.on("connection", (socket: WebSocket, request: IncomingMessage) => {
     sockets.add(socket);
@@ -235,12 +345,8 @@ export async function createGateway(
       }
       if (request.url?.split("?")[0] === "/api/v1/terminal") {
         try {
-          terminals.attach(
-            service.backend(hello.backendId),
-            socket,
-            hello.cols,
-            hello.rows,
-          );
+          const backend = backendForRequest(hello.backendId, hello.sessionId);
+          terminals.attach(backend, socket, hello.cols, hello.rows);
         } catch {
           send(socket, {
             type: "error",
@@ -295,7 +401,9 @@ export async function createGateway(
   app.addHook("onClose", async () => {
     terminals.close();
     for (const socket of sockets) socket.terminate();
+    for (const socket of agents) socket.terminate();
     wss.close();
+    agentWss.close();
     await service.close();
   });
   return app;

@@ -90,6 +90,18 @@ const { createGateway } = require("../src/server/gateway/http.js");
       .getByText("Finished on the execution host.", { exact: true })
       .waitFor();
     assert.equal(runtime.starts, 1);
+    await page.getByRole("textbox", { name: "Message", exact: true }).fill("");
+    await page
+      .getByRole("textbox", { name: "Message", exact: true })
+      .press("Control+Enter");
+    await page
+      .getByRole("alert")
+      .filter({ hasText: "Enter a message or attach a file" })
+      .waitFor();
+    assert.equal(
+      await page.getByRole("button", { name: "Retry delivery" }).count(),
+      0,
+    );
     await context.setOffline(true);
     await page
       .getByRole("textbox", { name: "Message", exact: true })

@@ -11,8 +11,19 @@ export type BackendSummary = {
     terminal: boolean;
     chatgpt: boolean;
     computerUse: boolean;
+    remoteControl: boolean;
   };
 };
+
+export class GatewayRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "GatewayRequestError";
+  }
+}
 
 /** Shared by the independently deployed web app and bundled mobile shell. */
 export class GatewayClient extends EventTarget {
@@ -58,7 +69,10 @@ export class GatewayClient extends EventTarget {
     });
     if (!response.ok) {
       const problem = await response.json().catch(() => null);
-      throw new Error(problem?.error ?? `Server returned ${response.status}`);
+      throw new GatewayRequestError(
+        problem?.error ?? `Server returned ${response.status}`,
+        response.status,
+      );
     }
     return response.json();
   }
@@ -134,7 +148,12 @@ export class GatewayClient extends EventTarget {
     if (this.socket?.readyState === WebSocket.OPEN)
       this.socket.send(JSON.stringify({ type: "unsubscribe" }));
   }
-  terminal(backendId: string, cols: number, rows: number): WebSocket {
+  terminal(
+    backendId: string,
+    cols: number,
+    rows: number,
+    sessionId?: string | null,
+  ): WebSocket {
     const url = this.url("api/v1/terminal");
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(url);
@@ -145,6 +164,7 @@ export class GatewayClient extends EventTarget {
           version: 1,
           token: this.token,
           backendId,
+          ...(sessionId ? { sessionId } : {}),
           cols,
           rows,
         }),
@@ -152,7 +172,11 @@ export class GatewayClient extends EventTarget {
     );
     return socket;
   }
-  async upload(backendId: string, file: File): Promise<any> {
+  async upload(
+    backendId: string,
+    file: File,
+    sessionId?: string | null,
+  ): Promise<any> {
     if (file.size > 10 * 1024 * 1024)
       throw new Error("Maximum attachment size is 10 MiB");
     const data = await new Promise<string>((resolve, reject) => {
@@ -163,14 +187,19 @@ export class GatewayClient extends EventTarget {
     });
     return this.request(
       `api/v1/backends/${encodeURIComponent(backendId)}/uploads`,
-      { name: file.name, data },
+      { name: file.name, data, ...(sessionId ? { sessionId } : {}) },
     );
   }
-  async download(backendId: string, path: string): Promise<Blob> {
+  async download(
+    backendId: string,
+    path: string,
+    sessionId?: string | null,
+  ): Promise<Blob> {
     const url = this.url(
       `api/v1/backends/${encodeURIComponent(backendId)}/download`,
     );
     url.searchParams.set("path", path);
+    if (sessionId) url.searchParams.set("sessionId", sessionId);
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${this.token}` },
     });

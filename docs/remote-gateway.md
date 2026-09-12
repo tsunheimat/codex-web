@@ -3,11 +3,11 @@
 This upgrade adds a standalone server and a responsive web/mobile client next
 to the existing desktop-compatible renderer. Both deployments remain available:
 
-| Entry point | UI and execution integration |
-| --- | --- |
-| `npm run server` | Existing patched upstream renderer and Electron compatibility server |
-| `npm run gateway -- /absolute/path/gateway.json` | New persistent session service and app-server connectors |
-| `npm run build:gateway:web` | Independent static client, also used by Capacitor |
+| Entry point                                      | UI and execution integration                                         |
+| ------------------------------------------------ | -------------------------------------------------------------------- |
+| `npm run server`                                 | Existing patched upstream renderer and Electron compatibility server |
+| `npm run gateway -- /absolute/path/gateway.json` | New persistent session service and app-server connectors             |
+| `npm run build:gateway:web`                      | Independent static client, also used by Capacitor                    |
 
 The gateway owns upstream connections. Closing, suspending, reloading, or replacing
 a client only detaches a viewer. A second device uses the same session ID and
@@ -87,9 +87,32 @@ runtime when attachment fails.
   "id": "shared-desktop",
   "label": "Desktop shared runtime",
   "cwd": "/home/me/projects",
-  "transport": { "type": "unix", "socketPath": "/run/user/1000/codex/app-server.sock" }
+  "transport": {
+    "type": "unix",
+    "socketPath": "/run/user/1000/codex/app-server.sock"
+  }
 }
 ```
+
+**Outbound companion for a computer behind NAT:** configure the backend as
+`type: "companion"`, set its `agentTokenEnv`, and run the companion on the
+computer:
+
+```bash
+export CODEX_WEB_COMPANION_GATEWAY=wss://gateway.example.com
+export CODEX_WEB_COMPANION_BACKEND=my-computer-companion
+export CODEX_WEB_COMPANION_TOKEN='a-separate-random-agent-token'
+node scripts/codex_web_companion.cjs
+```
+
+The companion starts the local app-server once, forwards its structured stdio
+over the authenticated outbound socket, and reconnects that socket with an
+exponential backoff. The gateway never accepts browser-supplied companion
+credentials. A companion reconnect cannot replay an in-flight RPC; the gateway
+marks its delivery unknown and reconciles from authoritative thread history.
+Set the gateway process's `CODEX_WEB_COMPANION_AGENT_TOKEN` to the same secret
+as the companion's `CODEX_WEB_COMPANION_TOKEN`, and keep both values outside
+the checked-in JSON configuration.
 
 **Codex over SSH stdio:**
 
@@ -151,6 +174,27 @@ The transport uses the documented app-server handshake (`initialize`, then
 integration should be tested against your installed runtime version.
 [Official app-server protocol](https://learn.chatgpt.com/docs/app-server).
 
+### Use Codex's official Remote host relay
+
+For a host that should also be available through OpenAI's supported Remote
+clients, start or enable Codex Remote on that host first:
+
+```bash
+codex remote-control start
+```
+
+The gateway's **Official Remote** panel calls the app-server's
+`remoteControl/*` methods to show status and create a short-lived pairing code.
+The code is shown only to the authenticated gateway viewer; it is never placed
+in a URL or backend summary. Pair the official Codex client using that code.
+This is a host-control surface, not a reimplementation of OpenAI's relay
+protocol.
+
+An app-server connection does not automatically provide native ChatGPT
+attachments or Computer Use. Those remain capabilities of the official
+Desktop/Remote host and are reported separately from `codex` in the backend
+capability list.
+
 ## Separate web and mobile deployments
 
 The gateway can serve `scratch/gateway-web` through `webRoot`, or you can omit
@@ -201,7 +245,7 @@ server, edit the deployed file:
 
 ```js
 window.__CODEX_WEB_CONFIG__ = {
-  serverBaseUrl: "https://desktop-bridge.example.com"
+  serverBaseUrl: "https://desktop-bridge.example.com",
 };
 ```
 
@@ -225,17 +269,17 @@ behavior; it does not acquire the new gateway's durability guarantees.
 
 ## Session guarantees and API
 
-| Event | Gateway behavior |
-| --- | --- |
-| Phone suspends; browser closes; viewer disconnects | Retain upstream connection and continue consuming runtime events |
-| Reconnect from another device | Synchronize the same session from its current snapshot and cursor |
-| Event cursor is older than retention | Return a current snapshot and `reset: true` |
-| Prompt HTTP reply is lost | Retry the identical `clientCommandId`; the server returns the existing command |
-| Runtime acknowledgement is lost | Persist `unknown`; inspect `thread/read`; never replay `turn/start` |
-| Approval answered from two devices | First response claims it; subsequent responses receive HTTP 409 |
-| Runtime reconnects or gateway restarts | Old approval IDs become stale; they cannot authorize a new runtime |
-| Gateway restarts with an external runtime | Reattach and reconcile available history; no automatic work replay |
-| Owned local/SSH runtime exits | Reconnect/recover available history; interruption is possible |
+| Event                                              | Gateway behavior                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Phone suspends; browser closes; viewer disconnects | Retain upstream connection and continue consuming runtime events               |
+| Reconnect from another device                      | Synchronize the same session from its current snapshot and cursor              |
+| Event cursor is older than retention               | Return a current snapshot and `reset: true`                                    |
+| Prompt HTTP reply is lost                          | Retry the identical `clientCommandId`; the server returns the existing command |
+| Runtime acknowledgement is lost                    | Persist `unknown`; inspect `thread/read`; never replay `turn/start`            |
+| Approval answered from two devices                 | First response claims it; subsequent responses receive HTTP 409                |
+| Runtime reconnects or gateway restarts             | Old approval IDs become stale; they cannot authorize a new runtime             |
+| Gateway restarts with an external runtime          | Reattach and reconcile available history; no automatic work replay             |
+| Owned local/SSH runtime exits                      | Reconnect/recover available history; interruption is possible                  |
 
 Commands progress through `received → dispatching → accepted`, or `failed` /
 `unknown`. `accepted` is a runtime acknowledgement, not a completion claim. Turn
@@ -255,21 +299,23 @@ with its WAL or use SQLite's backup tooling. Conversation history remains on the
 execution host, and losing the gateway database loses its command deduplication
 records. There is no exactly-once guarantee across that loss.
 
-| API | Purpose |
-| --- | --- |
-| `GET /api/v1` | Protocol compatibility check |
-| `GET /api/v1/backends` | Sanitized backend list and capabilities |
-| `GET /api/v1/backends/:id/threads` | Recent upstream threads for import |
-| `GET, POST /api/v1/sessions` | List sessions; create/import one with `clientCommandId` |
-| `GET /api/v1/sessions/:id?afterSeq=N` | Snapshot, cursor, commands and pending approvals |
-| `POST /api/v1/sessions/:id/commands` | `turn/start`, `turn/steer`, or `turn/interrupt` |
-| `POST /api/v1/sessions/:id/reconcile` | Read authoritative history without starting work |
-| `POST /api/v1/approvals/:id` | Answer a live approval/input request |
-| `WS /api/v1/events` | Authenticate, then subscribe to a session |
-| `GET /api/v1/backends/:id/files` | Browse the configured host workspace |
-| `POST /api/v1/backends/:id/uploads` | Separate bounded HTTPS upload |
-| `GET /api/v1/backends/:id/download` | Download a selected host file |
-| `WS /api/v1/terminal` | Separate authenticated terminal stream |
+| API                                                | Purpose                                                  |
+| -------------------------------------------------- | -------------------------------------------------------- |
+| `GET /api/v1`                                      | Protocol compatibility check                             |
+| `GET /api/v1/backends`                             | Sanitized backend list and capabilities                  |
+| `GET /api/v1/backends/:id/threads`                 | Recent upstream threads for import                       |
+| `GET /api/v1/backends/:id/remote-control`          | Official Remote host status                              |
+| `POST /api/v1/backends/:id/remote-control/:action` | Enable, disable, pair, or manage official Remote clients |
+| `GET, POST /api/v1/sessions`                       | List sessions; create/import one with `clientCommandId`  |
+| `GET /api/v1/sessions/:id?afterSeq=N`              | Snapshot, cursor, commands and pending approvals         |
+| `POST /api/v1/sessions/:id/commands`               | `turn/start`, `turn/steer`, or `turn/interrupt`          |
+| `POST /api/v1/sessions/:id/reconcile`              | Read authoritative history without starting work         |
+| `POST /api/v1/approvals/:id`                       | Answer a live approval/input request                     |
+| `WS /api/v1/events`                                | Authenticate, then subscribe to a session                |
+| `GET /api/v1/backends/:id/files`                   | Browse the configured host workspace                     |
+| `POST /api/v1/backends/:id/uploads`                | Separate bounded HTTPS upload                            |
+| `GET /api/v1/backends/:id/download`                | Download a selected host file                            |
+| `WS /api/v1/terminal`                              | Separate authenticated terminal stream                   |
 
 An events client first sends `{ "type": "authenticate", "version": 1, "token":
 "..." }`, waits for `ready`, then sends `{ "type": "subscribe", "sessionId":
@@ -285,6 +331,12 @@ symlink escapes. Listings are bounded to 1,000 entries; uploads/downloads to
 100 MiB quota per workspace. Remove old uploads through host maintenance when
 they are no longer needed by tasks.
 
+When an existing thread is imported, the gateway records the thread's own host
+workspace. Subsequent file browsing, uploads, downloads, and terminal sessions
+must include that session ID so they operate in the same project as Codex. A
+backend's configured `cwd` is used only until a new thread or import returns its
+authoritative working directory.
+
 Terminal access uses a real PTY and tmux, including resize, keyboard input and a
 bounded replay tail. Disconnecting a terminal viewer leaves the gateway's PTY
 alive. When a gateway's SSH terminal closes, tmux remains on the target. Reopening
@@ -297,11 +349,12 @@ no fallback to gateway-local paths for those targets.
 
 ## Desktop capability validation still required
 
-This iteration implements app-server attachment. It does **not** implement
-OpenAI's official device relay, Remodex-style private Desktop IPC, native ChatGPT
-completion ownership, or native computer-use services. The gateway explicitly
-reports ChatGPT and Computer Use as unavailable. The old renderer remains useful
-for its existing supported workflows.
+This iteration can control the host side of OpenAI's official device relay
+through the app-server's `remoteControl/*` methods, but it does not implement a
+replacement client for that relay. It also does not implement Remodex-style
+private Desktop IPC, native ChatGPT completion ownership, or native computer-use
+services. The gateway explicitly reports ChatGPT and Computer Use as unavailable.
+The old renderer remains useful for its existing supported workflows.
 
 Before enabling a future Desktop connector, test on the user's actual OS and
 installed runtime:

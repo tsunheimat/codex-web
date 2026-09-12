@@ -18,7 +18,8 @@ export class TerminalService {
     if (t.type !== "stdio" && t.type !== "ssh")
       throw new Error("This connection has no terminal channel");
     const dimensions = this.dimensions(cols, rows);
-    let terminal = this.terminals.get(backend.id);
+    const terminalKey = `${backend.id}:${backend.cwd}`;
+    let terminal = this.terminals.get(terminalKey);
     if (!terminal) {
       if (this.terminals.size >= 8)
         throw new Error("Terminal capacity exceeded");
@@ -44,7 +45,7 @@ export class TerminalService {
         env: process.env,
       });
       terminal = { pty, viewers: new Set(), tail: "" };
-      this.terminals.set(backend.id, terminal);
+      this.terminals.set(terminalKey, terminal);
       const owned = terminal;
       pty.onData((data: string) => {
         owned.tail = (owned.tail + data).slice(-256 * 1024);
@@ -56,7 +57,7 @@ export class TerminalService {
         }
       });
       pty.onExit(() => {
-        this.terminals.delete(backend.id);
+        this.terminals.delete(terminalKey);
         for (const viewer of owned.viewers)
           viewer.close(1000, "Terminal detached");
       });

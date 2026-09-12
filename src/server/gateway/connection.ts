@@ -43,6 +43,10 @@ export class AppServerConnection extends EventEmitter {
         new DeliveryUnknownError("Connection owner has shut down"),
       );
     if (this.connected) return Promise.resolve();
+    if (this.backend.transport.type === "companion")
+      return Promise.reject(
+        new DeliveryUnknownError("Execution companion is not connected"),
+      );
     if (this.opening) return this.opening;
     this.opening = this.open().finally(() => {
       this.opening = null;
@@ -162,8 +166,12 @@ export class AppServerConnection extends EventEmitter {
           tunnel.stdout.on("end", () => stream.push(null));
           stream.on("error", fail);
           options.createConnection = () => stream;
-        } else {
+        } else if (t.type === "websocket") {
           url = t.url;
+        } else {
+          throw new DeliveryUnknownError(
+            "Companion must connect through the agent endpoint",
+          );
         }
         const socket = new WebSocket(url, options);
         socket.on("message", (data, binary) => {
@@ -211,16 +219,67 @@ export class AppServerConnection extends EventEmitter {
           );
         });
       }
-      await this.rpc("initialize", {
-        clientInfo: {
-          name: "codex_web_gateway",
-          title: "Codex Web Gateway",
-          version: "1.0.0",
-        },
+      await this.initialize(epoch);
+    } catch (error) {
+      fail();
+      throw error;
+    }
+  }
+
+  private async initialize(epoch: string): Promise<void> {
+    await this.rpc("initialize", {
+      clientInfo: {
+        name: "codex_web_gateway",
+        title: "Codex Web Gateway",
+        version: "1.0.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+      },
+    });
+    this.send({ method: "initialized" });
+    this.connected = true;
+    this.emit("connected", epoch);
+  }
+
+  /** Attach a target-side companion's already-open WebSocket transport. */
+  async attachCompanion(socket: WebSocket, initialize = true): Promise<void> {
+    if (this.backend.transport.type !== "companion")
+      throw new Error("Backend is not configured for a companion");
+    if (this.closed) {
+      socket.close(1001, "Gateway is shutting down");
+      throw new DeliveryUnknownError("Connection owner has shut down");
+    }
+    this.disconnect();
+    this.epoch = randomUUID();
+    const epoch = this.epoch;
+    const fail = () => {
+      if (this.epoch === epoch) this.disconnect();
+    };
+    socket.on("message", (data, binary) => {
+      if (binary) fail();
+      else this.receive(String(data), epoch);
+    });
+    socket.on("close", fail);
+    socket.on("error", fail);
+    this.sendFrame = (frame) => {
+      if (socket.readyState !== WebSocket.OPEN)
+        throw new DeliveryUnknownError("Companion socket unavailable");
+      socket.send(frame, (error) => {
+        if (error) fail();
       });
-      this.send({ method: "initialized" });
-      this.connected = true;
-      this.emit("connected", epoch);
+    };
+    this.shutdownTransport = () => {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1000);
+      else socket.terminate();
+    };
+    try {
+      if (initialize) await this.initialize(epoch);
+      else {
+        this.connected = true;
+        this.emit("connected", epoch);
+      }
     } catch (error) {
       fail();
       throw error;

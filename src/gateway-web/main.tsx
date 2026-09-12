@@ -1,6 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { GatewayClient, type BackendSummary } from "../client/gateway-client";
+import {
+  GatewayClient,
+  GatewayRequestError,
+  type BackendSummary,
+} from "../client/gateway-client";
 import "./style.css";
 
 const cached = <T,>(key: string, fallback: T): T => {
@@ -26,6 +30,8 @@ const statusLabel = (value: string) =>
     dispatching: "Awaiting runtime",
     accepted: "Accepted by runtime",
     unknown: "Delivery unknown",
+    delivery_unknown: "Delivery unknown",
+    failed: "Failed",
     creating: "Creating conversation",
     ready: "Ready",
   })[value] ?? value?.replaceAll("_", " ");
@@ -50,11 +56,12 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const [menu, setMenu] = useState(false);
-  const [panel, setPanel] = useState<"files" | "import" | "terminal" | null>(
-    null,
-  );
+  const [panel, setPanel] = useState<
+    "files" | "import" | "terminal" | "remote" | null
+  >(null);
   const [directory, setDirectory] = useState<any>(null);
   const [threads, setThreads] = useState<any[]>([]);
+  const [remote, setRemote] = useState<any>(null);
   const [outbox, setOutbox] = useState<any>(null);
   const end = useRef<HTMLDivElement>(null);
   const terminalEl = useRef<HTMLDivElement>(null);
@@ -89,6 +96,10 @@ function App() {
     setText(cached(`${namespace}:draft:${session.id}`, ""));
     location.hash = session.id;
     client?.subscribe(session.id, 0);
+  };
+  const clearOutbox = () => {
+    setOutbox(null);
+    save(`${namespace}:outbox`, null);
   };
   useEffect(() => {
     if (!client) return;
@@ -149,7 +160,7 @@ function App() {
       terminal.loadAddon(fit);
       terminal.open(terminalEl.current!);
       fit.fit();
-      ws = client.terminal(backendId, terminal.cols, terminal.rows);
+      ws = client.terminal(backendId, terminal.cols, terminal.rows, selected);
       ws.onmessage = (event) => {
         const m = JSON.parse(event.data);
         terminal.write(m.type === "output" ? m.data : `\r\n${m.error}\r\n`);
@@ -179,28 +190,37 @@ function App() {
       ws?.close();
       terminal?.dispose();
     };
-  }, [panel, client, backendId]);
+  }, [panel, client, backendId, selected]);
   const deliver = async (entry: any) => {
     if (!client) return;
     setOutbox(entry);
     save(`${namespace}:outbox`, entry);
-    const command = await client.request(entry.route, entry.body);
-    setOutbox(null);
-    save(`${namespace}:outbox`, null);
-    if (entry.create) {
-      await refresh(client);
-      const s = await client.request(`api/v1/sessions/${command.sessionId}`);
-      select(s.snapshot);
-      setState(s);
-    } else {
-      setText("");
-      setAttachments([]);
-      save(`${namespace}:draft:${command.sessionId}`, "");
-      if (command.sessionId !== selected) {
+    try {
+      const command = await client.request(entry.route, entry.body);
+      clearOutbox();
+      if (entry.create) {
+        await refresh(client);
         const s = await client.request(`api/v1/sessions/${command.sessionId}`);
         select(s.snapshot);
         setState(s);
+      } else {
+        setText("");
+        setAttachments([]);
+        save(`${namespace}:draft:${command.sessionId}`, "");
+        if (command.sessionId !== selected) {
+          const s = await client.request(
+            `api/v1/sessions/${command.sessionId}`,
+          );
+          select(s.snapshot);
+          setState(s);
+        }
       }
+    } catch (error) {
+      // Preserve network and server failures for safe idempotent retry. A
+      // client rejection cannot be repaired by resending the same payload.
+      if (error instanceof GatewayRequestError && error.status < 500)
+        clearOutbox();
+      throw error;
     }
   };
   const create = (threadId?: string) =>
@@ -223,6 +243,8 @@ function App() {
   const send = (method = "turn/start") =>
     handle(async () => {
       if (!selected || !client) return;
+      if (method !== "turn/interrupt" && !text.trim() && !attachments.length)
+        throw new Error("Enter a message or attach a file before sending");
       setBusy(true);
       try {
         const active = state?.snapshot.thread?.turns?.find(
@@ -286,7 +308,27 @@ function App() {
       setPanel("files");
       setDirectory(
         await client.request(
-          `api/v1/backends/${backendId}/files?path=${encodeURIComponent(path)}`,
+          `api/v1/backends/${backendId}/files?path=${encodeURIComponent(path)}${selected ? `&sessionId=${encodeURIComponent(selected)}` : ""}`,
+        ),
+      );
+    });
+  const showRemote = () =>
+    handle(async () => {
+      if (!client) return;
+      setPanel("remote");
+      setRemote(
+        await client.request(
+          `api/v1/backends/${encodeURIComponent(backendId)}/remote-control`,
+        ),
+      );
+    });
+  const remoteAction = (action: string, body: any = {}) =>
+    handle(async () => {
+      if (!client) return;
+      setRemote(
+        await client.request(
+          `api/v1/backends/${encodeURIComponent(backendId)}/remote-control/${encodeURIComponent(action)}`,
+          body,
         ),
       );
     });
@@ -427,6 +469,12 @@ function App() {
           >
             Terminal
           </button>
+          <button
+            disabled={!backend?.capabilities.remoteControl}
+            onClick={() => void showRemote()}
+          >
+            Official Remote
+          </button>
         </div>
         <p className="eyebrow recent-label">RECENT CONVERSATIONS</p>
         <nav>
@@ -483,7 +531,7 @@ function App() {
           </button>
           <div>
             <h2>{current?.title ?? backend?.label ?? "Choose a computer"}</h2>
-            <p className="muted host-path">{backend?.cwd}</p>
+            <p className="muted host-path">{current?.cwd ?? backend?.cwd}</p>
           </div>
           <span className="status-pill">
             {current
@@ -548,12 +596,43 @@ function App() {
                   ? "Terminal"
                   : panel === "files"
                     ? "Workspace files"
-                    : "Existing threads"}
+                    : panel === "remote"
+                      ? "Official Remote"
+                      : "Existing threads"}
               </h2>
               <button onClick={() => setPanel(null)}>Close</button>
             </div>
             {panel === "terminal" && (
               <div ref={terminalEl} className="terminal" />
+            )}
+            {panel === "remote" && (
+              <div className="remote-panel">
+                <p className="muted">
+                  This uses Codex&apos;s official host relay. Pairing is handled
+                  by Codex; this gateway does not expose the relay credential.
+                </p>
+                <pre>{JSON.stringify(remote, null, 2)}</pre>
+                <div className="panel-actions">
+                  <button onClick={() => void remoteAction("enable", {})}>
+                    Enable remote host
+                  </button>
+                  <button
+                    onClick={() => void remoteAction("pairing/start", {})}
+                  >
+                    Create pairing code
+                  </button>
+                  <button
+                    onClick={() =>
+                      void remoteAction("pairing/start", { manualCode: true })
+                    }
+                  >
+                    Create manual code
+                  </button>
+                  <button onClick={() => void showRemote()}>
+                    Refresh status
+                  </button>
+                </div>
+              </div>
             )}
             {panel === "import" &&
               threads.map((t) => (
@@ -586,6 +665,7 @@ function App() {
                             const blob = await client.download(
                               backendId,
                               entry.path,
+                              selected,
                             );
                             const url = URL.createObjectURL(blob);
                             const a = document.createElement("a");
@@ -711,7 +791,11 @@ function App() {
                         setBusy(true);
                         try {
                           for (const file of files) {
-                            const result = await client.upload(backendId, file);
+                            const result = await client.upload(
+                              backendId,
+                              file,
+                              selected,
+                            );
                             setAttachments((a) => [
                               ...a,
                               {

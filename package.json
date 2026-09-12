@@ -7,11 +7,13 @@
     "scratch/gateway-web/**/*",
     "src/server/**/*.js",
     "src/server/electron/index.js",
+    "scripts/codex_web_companion.cjs",
     "!**/*.ts"
   ],
   "bin": {
     "codex-web": "src/server/main.js",
-    "codex-web-gateway": "src/server/gateway/main.js"
+    "codex-web-gateway": "src/server/gateway/main.js",
+    "codex-web-companion": "scripts/codex_web_companion.cjs"
   },
   "scripts": {
     "prepare": "./scripts/prepare && npm run build:browser && npm run build:server",

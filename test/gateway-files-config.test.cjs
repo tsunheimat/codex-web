@@ -74,6 +74,19 @@ test("configuration requires credentials, TLS, stable identities and pinned SSH 
     shellQuote("a'b $(not-a-command)"),
     "'a'\\''b $(not-a-command)'",
   );
+  const companion = parseConfig(
+    {
+      ...config({
+        type: "companion",
+        agentTokenEnv: "COMPANION_TOKEN",
+        command: "codex",
+        args: ["app-server", "--listen", "stdio://"],
+      }),
+      allowedOrigins: [],
+    },
+    token,
+  );
+  assert.equal(companion.backends[0].transport.type, "companion");
 });
 
 test("files use the selected host root and uploads persist without accepting traversal or symlinks", async (t) => {

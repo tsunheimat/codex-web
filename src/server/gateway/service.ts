@@ -80,6 +80,12 @@ export class SessionService extends EventEmitter {
       throw Object.assign(new Error("Backend not found"), { statusCode: 404 });
     return backend;
   }
+  /** Return a backend view rooted at the selected session's execution project. */
+  backendForSession(id: string): Backend {
+    const session = this.store.get(id);
+    const backend = this.backend(session.backendId);
+    return { ...backend, cwd: session.cwd };
+  }
   summaries(): any[] {
     return this.backends.map((b) => ({
       id: b.id,
@@ -89,9 +95,12 @@ export class SessionService extends EventEmitter {
       connected: this.connections.get(b.id)!.connected,
       runtimeOwnership: ["stdio", "ssh"].includes(b.transport.type)
         ? "gateway-channel"
-        : "external",
+        : b.transport.type === "companion"
+          ? "companion"
+          : "external",
       capabilities: {
         codex: this.connections.get(b.id)!.connected,
+        remoteControl: this.connections.get(b.id)!.connected,
         chatgpt: false,
         computerUse: false,
         files: ["stdio", "ssh"].includes(b.transport.type),
@@ -100,7 +109,8 @@ export class SessionService extends EventEmitter {
     }));
   }
   start(): void {
-    for (const b of this.backends) this.track(this.warm(b.id));
+    for (const b of this.backends)
+      if (b.transport.type !== "companion") this.track(this.warm(b.id));
   }
   private track(promise: Promise<void>): void {
     this.running.add(promise);
@@ -223,6 +233,10 @@ export class SessionService extends EventEmitter {
           {
             threadId: result.thread.id,
             thread: result.thread,
+            cwd:
+              typeof result.thread.cwd === "string"
+                ? result.thread.cwd
+                : backend.cwd,
             status: statusFromThread(result.thread),
             connection: "connected",
             title:
@@ -353,14 +367,19 @@ export class SessionService extends EventEmitter {
 
   private failed(command: Command, error: unknown): void {
     const current = this.store.command(command.id)!;
+    const unknown =
+      error instanceof DeliveryUnknownError && current.state === "dispatching";
     this.record({
       ...command,
-      state:
-        error instanceof DeliveryUnknownError && current.state === "dispatching"
-          ? "unknown"
-          : "failed",
+      state: unknown ? "unknown" : "failed",
       error: error instanceof Error ? error.message : "Request failed",
     });
+    this.change(
+      command.sessionId,
+      unknown ? "command.unknown" : "command.failed",
+      { commandId: command.id },
+      { status: unknown ? "delivery_unknown" : "failed" },
+    );
   }
   private enqueue(id: string, work: () => Promise<void>): void {
     const task = (this.queued.get(id) ?? Promise.resolve())
@@ -389,7 +408,12 @@ export class SessionService extends EventEmitter {
       });
       if (result?.thread?.id !== session.threadId)
         throw new Error("Wrong thread returned by runtime");
-      const patch: Partial<Session> = { connection: "connected" };
+      const patch: Partial<Session> = {
+        connection: "connected",
+        ...(typeof result.thread.cwd === "string"
+          ? { cwd: result.thread.cwd }
+          : {}),
+      };
       // Never replace newer streaming state with an older in-flight read.
       if (this.store.get(id).seq === seq) {
         patch.thread = result.thread;
@@ -425,6 +449,9 @@ export class SessionService extends EventEmitter {
         {},
         {
           thread: result.thread,
+          ...(typeof result.thread.cwd === "string"
+            ? { cwd: result.thread.cwd }
+            : {}),
           status: statusFromThread(result.thread),
           connection: "connected",
         },
@@ -437,6 +464,74 @@ export class SessionService extends EventEmitter {
   async listThreads(id: string): Promise<any> {
     this.backend(id);
     return this.connections.get(id)!.request("thread/list", { limit: 30 });
+  }
+
+  async remoteControl(
+    id: string,
+    action:
+      | "status/read"
+      | "enable"
+      | "disable"
+      | "pairing/start"
+      | "pairing/status"
+      | "client/list"
+      | "client/revoke",
+    params: any = null,
+  ): Promise<any> {
+    this.backend(id);
+    const allowed: Record<string, string[]> = {
+      "status/read": [],
+      enable: ["ephemeral"],
+      disable: ["ephemeral"],
+      "pairing/start": ["manualCode"],
+      "pairing/status": ["pairingCode", "manualPairingCode"],
+      "client/list": ["environmentId", "cursor", "limit", "order"],
+      "client/revoke": ["environmentId", "clientId"],
+    };
+    const value = params ?? {};
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw Object.assign(new Error("Invalid remote-control parameters"), {
+        statusCode: 400,
+      });
+    if (
+      Object.keys(value).some((key) => !(allowed[action] ?? []).includes(key))
+    )
+      throw Object.assign(new Error("Unsupported remote-control parameter"), {
+        statusCode: 400,
+      });
+    return this.connections.get(id)!.request(`remoteControl/${action}`, value);
+  }
+
+  companionToken(id: string): string | null {
+    const backend = this.backends.find((entry) => entry.id === id);
+    if (!backend) return null;
+    const transport = backend.transport;
+    if (transport.type !== "companion") return null;
+    const token = process.env[transport.agentTokenEnv];
+    return token && token.length >= 32 ? token : null;
+  }
+
+  async attachCompanion(
+    id: string,
+    socket: import("ws").WebSocket,
+    initialize = true,
+  ): Promise<void> {
+    const connection = this.connections.get(id);
+    if (!connection || this.backend(id).transport.type !== "companion")
+      throw Object.assign(new Error("Backend is not a companion target"), {
+        statusCode: 409,
+      });
+    await connection.attachCompanion(socket, initialize);
+    this.emit("backends");
+    for (const session of this.store
+      .list()
+      .filter((s) => s.backendId === id && s.threadId)) {
+      try {
+        await this.attach(session.id);
+      } catch {
+        // Keep the cached projection until the next authoritative read.
+      }
+    }
   }
 
   answer(id: string, result: any): void {
