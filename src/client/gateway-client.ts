@@ -180,6 +180,7 @@ export class GatewayClient extends EventTarget {
     backendId: string,
     file: File,
     sessionId?: string | null,
+    uploadId = crypto.randomUUID(),
   ): Promise<any> {
     if (file.size > 10 * 1024 * 1024)
       throw new Error("Maximum attachment size is 10 MiB");
@@ -191,7 +192,7 @@ export class GatewayClient extends EventTarget {
     });
     return this.request(
       `api/v1/backends/${encodeURIComponent(backendId)}/uploads`,
-      { name: file.name, data, ...(sessionId ? { sessionId } : {}) },
+      { name: file.name, data, uploadId, ...(sessionId ? { sessionId } : {}) },
     );
   }
   async download(

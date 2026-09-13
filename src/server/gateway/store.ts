@@ -9,6 +9,8 @@ export type Session = {
   conversationKind?: "codex" | "chatgpt";
   conversationId?: string;
   nativeConversation?: any;
+  nativeUploads?: any[];
+  computerUse?: any;
   cwd: string;
   title: string;
   status: string;

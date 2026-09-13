@@ -162,6 +162,23 @@ export async function createGateway(
     await service.reconcile(request.params.id);
     return service.store.sync(request.params.id, 0);
   });
+  app.get("/api/v1/sessions/:id/native-uploads", async (request: any) =>
+    service.nativeUploads(request.params.id),
+  );
+  app.post(
+    "/api/v1/sessions/:id/computer-use/:action",
+    async (request: any) => {
+      if (!["attach", "read", "stop"].includes(request.params.action))
+        throw Object.assign(new Error("Unsupported Computer Use action"), {
+          statusCode: 400,
+        });
+      return service.computerUse(
+        request.params.id,
+        request.params.action,
+        request.body,
+      );
+    },
+  );
   app.post("/api/v1/approvals/:id", async (request: any) => {
     await service.answer(request.params.id, request.body);
     return { ok: true };
@@ -187,15 +204,14 @@ export async function createGateway(
         b.data,
       )
     )
-      return reply
-        .code(400)
-        .send({
-          error: `Invalid upload (maximum ${uploadLimit / 1024 / 1024} MiB)`,
-        });
+      return reply.code(400).send({
+        error: `Invalid upload (maximum ${uploadLimit / 1024 / 1024} MiB)`,
+      });
     if (desktop)
       return service.desktopUpload(request.params.id, b.sessionId, {
         name: b.name,
         data: b.data,
+        ...(b.uploadId ? { uploadId: b.uploadId } : {}),
       });
     return hostFileOperation(request.params.id, b.sessionId, {
       action: "upload",
@@ -395,6 +411,14 @@ export async function createGateway(
     };
     const backends = () =>
       send(socket, { type: "backends", backends: service.summaries() });
+    const capture = (id: string, frame: any) => {
+      if (id === subscribed && socket.bufferedAmount < 128 * 1024)
+        send(socket, { type: "computer-use-capture", sessionId: id, frame });
+    };
+    const captureStatus = (backendId: string, status: any) => {
+      if (subscribed && service.store.get(subscribed).backendId === backendId)
+        send(socket, { type: "desktop-capture-status", backendId, status });
+    };
     socket.on("error", () => {});
     socket.on("close", () => {
       clearTimeout(handshake);
@@ -402,6 +426,8 @@ export async function createGateway(
       if (scheduled) clearTimeout(scheduled);
       service.off("session", update);
       service.off("backends", backends);
+      service.off("capture", capture);
+      service.off("captureStatus", captureStatus);
       sockets.delete(socket);
       // Detaching a viewer never closes a backend or interrupts a turn.
     });
@@ -438,6 +464,8 @@ export async function createGateway(
       send(socket, { type: "ready", version: 1 });
       service.on("session", update);
       service.on("backends", backends);
+      service.on("capture", capture);
+      service.on("captureStatus", captureStatus);
       socket.on("message", (data) => {
         try {
           const message = JSON.parse(String(data));
@@ -457,6 +485,10 @@ export async function createGateway(
           const state = service.store.sync(subscribed, message.afterSeq);
           cursor = state.lastSeq;
           send(socket, state);
+          const latest = service.captures.get(subscribed);
+          if (latest) capture(subscribed, latest);
+          const nativeStatus = service.captureStatuses.get(session.backendId);
+          if (nativeStatus) captureStatus(session.backendId, nativeStatus);
         } catch {
           send(socket, {
             type: "error",

@@ -89,50 +89,62 @@ test("configuration requires credentials, TLS, stable identities and pinned SSH 
   assert.equal(companion.backends[0].transport.type, "companion");
 });
 
-test("files use the selected host root and uploads persist without accepting traversal or symlinks", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-files-"));
-  const root = path.join(dir, "project");
-  fs.mkdirSync(root);
-  fs.writeFileSync(path.join(dir, "outside.txt"), "outside secret");
-  fs.writeFileSync(path.join(root, "inside.txt"), "inside");
-  fs.symlinkSync(path.join(dir, "outside.txt"), path.join(root, "escape"));
-  const backend = {
-    id: "local",
-    label: "Local",
-    cwd: root,
-    transport: { type: "stdio", command: "codex", args: [] },
-  };
-  t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
-  const listing = await fileOperation(backend, { action: "list" });
-  assert.equal(listing.root, root);
-  assert.deepEqual(
-    listing.entries.map((e) => e.name),
-    ["inside.txt"],
-  );
-  for (const unsafe of ["../outside.txt", "escape"])
-    await assert.rejects(
-      () => fileOperation(backend, { action: "read", path: unsafe }),
-      /outside/,
+test(
+  "files use the selected host root and uploads persist without accepting traversal or symlinks",
+  {
+    skip:
+      process.platform === "win32"
+        ? "POSIX O_NOFOLLOW helper; exercised by the full Linux suite"
+        : false,
+  },
+  async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-files-"));
+    const root = path.join(dir, "project");
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(dir, "outside.txt"), "outside secret");
+    fs.writeFileSync(path.join(root, "inside.txt"), "inside");
+    fs.symlinkSync(path.join(dir, "outside.txt"), path.join(root, "escape"));
+    const backend = {
+      id: "local",
+      label: "Local",
+      cwd: root,
+      transport: { type: "stdio", command: "codex", args: [] },
+    };
+    t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
+    const listing = await fileOperation(backend, { action: "list" });
+    assert.equal(listing.root, root);
+    assert.deepEqual(
+      listing.entries.map((e) => e.name),
+      ["inside.txt"],
     );
-  const uploaded = await fileOperation(backend, {
-    action: "upload",
-    name: "../../weird;$(echo bad).txt",
-    data: Buffer.from("photo bytes").toString("base64"),
-  });
-  assert.ok(uploaded.path.startsWith(root + "/.codex-web-uploads/"));
-  assert.equal(fs.readFileSync(uploaded.path, "utf8"), "photo bytes");
-  assert.equal(fs.statSync(uploaded.path).mode & 0o777, 0o600);
-  const read = await fileOperation(backend, {
-    action: "read",
-    path: uploaded.path,
-  });
-  assert.equal(Buffer.from(read.data, "base64").toString(), "photo bytes");
-  await assert.rejects(
-    () =>
-      fileOperation(
-        { ...backend, transport: { type: "websocket", url: "ws://localhost" } },
-        { action: "list" },
-      ),
-    /no host file channel/,
-  );
-});
+    for (const unsafe of ["../outside.txt", "escape"])
+      await assert.rejects(
+        () => fileOperation(backend, { action: "read", path: unsafe }),
+        /outside/,
+      );
+    const uploaded = await fileOperation(backend, {
+      action: "upload",
+      name: "../../weird;$(echo bad).txt",
+      data: Buffer.from("photo bytes").toString("base64"),
+    });
+    assert.ok(uploaded.path.startsWith(root + "/.codex-web-uploads/"));
+    assert.equal(fs.readFileSync(uploaded.path, "utf8"), "photo bytes");
+    assert.equal(fs.statSync(uploaded.path).mode & 0o777, 0o600);
+    const read = await fileOperation(backend, {
+      action: "read",
+      path: uploaded.path,
+    });
+    assert.equal(Buffer.from(read.data, "base64").toString(), "photo bytes");
+    await assert.rejects(
+      () =>
+        fileOperation(
+          {
+            ...backend,
+            transport: { type: "websocket", url: "ws://localhost" },
+          },
+          { action: "list" },
+        ),
+      /no host file channel/,
+    );
+  },
+);

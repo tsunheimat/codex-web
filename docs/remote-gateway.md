@@ -364,7 +364,8 @@ The `desktop` transport uses `DesktopConnection`, separate from `AppServerConnec
 The [Windows bridge](remote-desktop.md) attaches to the already-running Desktop;
 it never starts an app-server, companion, or replacement runtime. Native ChatGPT
 text and history use Desktop's app-tools handlers. Native upload and Computer Use
-control gaps name the exact renderer/helper interfaces in the protocol reference.
+controls use the separately approved in-process binding described in
+[native adapter installation](native-adapter-installation.md).
 Bridge validation covers its own routing, framing, approvals, TLS and reconnect
 behavior. It does not require retesting the user's established native features.
 

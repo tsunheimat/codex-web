@@ -6,8 +6,11 @@ Capacitor mobile packaging. See [Remote gateway setup](docs/remote-gateway.md).
 The existing renderer/server workflow below remains available.
 [Remote Desktop mode](docs/remote-desktop.md) attaches an outbound Windows bridge
 to the running Desktop, with Codex follower control and native ChatGPT text/history.
-Native ChatGPT uploads and remote Computer Use controls still need the specific
-Desktop interfaces documented there.
+Native ChatGPT photo submission and Computer Use observation/approvals are
+implemented behind a [reviewed in-process adapter](docs/native-adapter-installation.md).
+This is an optional compatibility mode, disabled until separately approved and
+loaded. The unmodified-Desktop bridge remains the default; see the
+[Remote route assessment and patch review](docs/native-adapter-review.md).
 
 a browser frontend for codex desktop, running on a machine you control.
 

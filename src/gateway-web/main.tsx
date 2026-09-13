@@ -52,6 +52,8 @@ function App() {
   const [state, setState] = useState<any>(null);
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<any[]>([]);
+  const [capture, setCapture] = useState<any>(null);
+  const [captureStatus, setCaptureStatus] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
@@ -93,6 +95,7 @@ function App() {
     setMenu(false);
     setPanel(null);
     setAttachments([]);
+    setCapture(null);
     setState(cached(`${namespace}:snapshot:${session.id}`, null));
     setText(cached(`${namespace}:draft:${session.id}`, ""));
     location.hash = session.id;
@@ -124,6 +127,8 @@ function App() {
           save(`${namespace}:snapshot:${message.snapshot.id}`, message);
       }
       if (message.type === "backends") setBackends(message.backends);
+      if (message.type === "computer-use-capture") setCapture(message);
+      if (message.type === "desktop-capture-status") setCaptureStatus(message);
       if (["ready", "sessions.changed"].includes(message.type) && !refreshTimer)
         refreshTimer = setTimeout(() => {
           refreshTimer = null;
@@ -154,6 +159,29 @@ function App() {
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [state?.snapshot?.seq]);
+  useEffect(() => {
+    if (
+      state?.snapshot?.id !== selected ||
+      state?.snapshot?.conversationKind !== "chatgpt"
+    )
+      return;
+    const removed = cached<string[]>(
+      `${namespace}:removed-uploads:${selected}`,
+      [],
+    );
+    const ready = (state.snapshot.nativeUploads ?? []).filter(
+      (u: any) =>
+        u.state === "ready" &&
+        !u.usedByCommandId &&
+        !removed.includes(u.uploadId),
+    );
+    setAttachments((current) => [
+      ...current,
+      ...ready
+        .filter((u: any) => !current.some((a) => a.uploadId === u.uploadId))
+        .map((u: any) => ({ ...u, image: true })),
+    ]);
+  }, [state?.snapshot?.nativeUploads, selected]);
   useEffect(() => {
     if (panel !== "terminal" || !client || !terminalEl.current) return;
     let disposed = false;
@@ -281,7 +309,14 @@ function App() {
           ),
         ];
         const params = native
-          ? { prompt: text.trim() }
+          ? {
+              prompt: text.trim(),
+              ...(attachments.length
+                ? {
+                    attachmentIds: attachments.map((a) => a.nativeAttachmentId),
+                  }
+                : {}),
+            }
           : method === "turn/interrupt"
             ? { turnId: active?.id }
             : {
@@ -770,13 +805,93 @@ function App() {
                   output remain available in Desktop.
                 </p>
               )}
-              {current.conversationKind === "chatgpt" && (
-                <p className="muted">
-                  ChatGPT on Desktop · Recent history refreshes automatically.
-                  Attachments and Computer Use controls are available in
-                  Desktop.
-                </p>
+              {backend?.capabilities.computerUse && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handle(async () => {
+                      await client.request(
+                        `api/v1/sessions/${selected}/computer-use/attach`,
+                        {},
+                      );
+                    })
+                  }
+                >
+                  Observe Computer Use
+                </button>
               )}
+              {current.computerUse && (
+                <section
+                  className="computer-use-panel"
+                  aria-label="Computer Use"
+                >
+                  <p>Computer Use · {current.computerUse.status}</p>
+                  {captureStatus?.backendId === backendId && (
+                    <p className="muted">
+                      Desktop capture · {captureStatus.status.status}
+                    </p>
+                  )}
+                  {capture?.sessionId === selected &&
+                    capture.frame.ownerId === current.computerUse.ownerId &&
+                    capture.frame.turnId === current.computerUse.turnId &&
+                    current.computerUse.status === "active" && (
+                      <img
+                        src={capture.frame.dataUrl}
+                        alt="Latest screenshot from Desktop Computer Use"
+                      />
+                    )}
+                  <button
+                    type="button"
+                    disabled={
+                      !backend?.capabilities.computerUse ||
+                      current.computerUse.status !== "active"
+                    }
+                    onClick={() =>
+                      void handle(async () => {
+                        await client.request(
+                          `api/v1/sessions/${selected}/computer-use/stop`,
+                          {
+                            ownerId: current.computerUse.ownerId,
+                            turnId: current.computerUse.turnId,
+                            clientCommandId: crypto.randomUUID(),
+                          },
+                        );
+                      })
+                    }
+                  >
+                    Stop Computer Use
+                  </button>
+                </section>
+              )}
+              {(current.nativeUploads ?? [])
+                .filter((u: any) =>
+                  ["uploading", "unknown", "failed"].includes(u.state),
+                )
+                .map((u: any) => (
+                  <p className="notice" key={u.uploadId}>
+                    {u.name} · {u.state}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handle(async () => {
+                          await client.request(
+                            `api/v1/sessions/${selected}/native-uploads`,
+                          );
+                        })
+                      }
+                    >
+                      Check upload status
+                    </button>
+                  </p>
+                ))}
+              {current.conversationKind === "chatgpt" &&
+                !backend?.capabilities.chatgptAttachments && (
+                  <p className="muted">
+                    ChatGPT on Desktop · Recent history refreshes automatically.
+                    Attachments and Computer Use controls are available in
+                    Desktop.
+                  </p>
+                )}
               {!(current.nativeConversation?.turns ?? current.thread?.turns)
                 ?.length && (
                 <p className="muted start-hint">
@@ -830,16 +945,27 @@ function App() {
               />
               <div className="attachments">
                 {attachments.map((a) => (
-                  <span key={a.path}>
+                  <span key={a.uploadId ?? a.path}>
                     {a.name}
                     <button
                       type="button"
                       aria-label={`Remove ${a.name}`}
-                      onClick={() =>
+                      onClick={() => {
+                        if (a.uploadId)
+                          save(`${namespace}:removed-uploads:${selected}`, [
+                            ...cached<string[]>(
+                              `${namespace}:removed-uploads:${selected}`,
+                              [],
+                            ),
+                            a.uploadId,
+                          ]);
                         setAttachments(
-                          attachments.filter((v) => v.path !== a.path),
-                        )
-                      }
+                          attachments.filter(
+                            (v) =>
+                              (v.uploadId ?? v.path) !== (a.uploadId ?? a.path),
+                          ),
+                        );
+                      }}
                     >
                       ×
                     </button>
@@ -879,13 +1005,18 @@ function App() {
                               file,
                               selected,
                             );
-                            setAttachments((a) => [
-                              ...a,
-                              {
-                                ...result,
-                                image: file.type.startsWith("image/"),
-                              },
-                            ]);
+                            setAttachments((a) =>
+                              result.uploadId &&
+                              a.some((v) => v.uploadId === result.uploadId)
+                                ? a
+                                : [
+                                    ...a,
+                                    {
+                                      ...result,
+                                      image: file.type.startsWith("image/"),
+                                    },
+                                  ],
+                            );
                           }
                         } finally {
                           setBusy(false);
@@ -913,6 +1044,8 @@ function App() {
                   disabled={
                     busy ||
                     !!outbox ||
+                    (attachments.some((a) => a.nativeAttachmentId) &&
+                      !backend?.capabilities.chatgptAttachments) ||
                     (current.conversationKind === "chatgpt" &&
                       current.status === "running") ||
                     (!text.trim() && !attachments.length) ||

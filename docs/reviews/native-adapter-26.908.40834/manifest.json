@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "purpose": "optional-compatibility-review-only",
+  "applied": false,
+  "desktopVersion": "26.908.40834",
+  "bindingId": "codex-web-native/26.908.40834/v1",
+  "originalArchiveSha256": "2bd5b96a48232f3ccf3df6be50965920699ea3a1b4512dcdd770e209fd1f009e",
+  "proposedArchiveSha256": "d24fd323d6e8cc385278727bb0800d2b9ec0dc484271a80139d71a60be14c07b",
+  "localApprovalPlanSha256": "9d3c4bcde910e54ab7fffc5cbd5c75154686640333bbc56d5174b3204c47c11d",
+  "normalization": {
+    "formatter": "prettier",
+    "version": "3.8.2",
+    "parser": "babel",
+    "endOfLine": "lf"
+  },
+  "sourceHashes": {
+    "main": "b55be874a9b5a262c09a7945df38cec9b0ce8f14bd584ef73d6feca301ed90b4",
+    "renderer": "7c3a89e7e224f76031b45a88f72af8cd60f0c3d47aac9ca34b2c70e11dfe9867"
+  },
+  "components": [
+    {
+      "path": ".vite/build/main-D8abTQQE.js",
+      "change": "modify",
+      "inputSha256": "b55be874a9b5a262c09a7945df38cec9b0ce8f14bd584ef73d6feca301ed90b4",
+      "outputSha256": "addc3583e654728b64639bcbec2e74e28359cbe9ec24f3c323e70d98a2f47882",
+      "normalizedInputSha256": "20da7661328e5e93e414e16446b6d821cc89599b9deaf141813026480c9e2df9",
+      "normalizedOutputSha256": "74f2e7758b539e12a4f11686b6929fab4804290ce5be78f4ab265ecab2672573"
+    },
+    {
+      "path": "webview/assets/app-initial-d9bed9d614d8.js",
+      "change": "modify",
+      "inputSha256": "7c3a89e7e224f76031b45a88f72af8cd60f0c3d47aac9ca34b2c70e11dfe9867",
+      "outputSha256": "a0cb606591ffbe120bf279566f496cbd3c7e3fc39dd503238a23cc0e1518a258",
+      "normalizedInputSha256": "5ab199066d77824aef4671931f503882e1b38b9665ec398a98ea0e2b80628477",
+      "normalizedOutputSha256": "b1f5a90ba0e32d6420a94fd6b5b7b4e8970dd346f8c82dd560e78986b846e9c9"
+    },
+    {
+      "path": ".vite/build/codex-web-native/entry.cjs",
+      "change": "add",
+      "inputSha256": null,
+      "outputSha256": "3615e6159865c95aa2529d4f1f29221164429e5b47d82439905bb1bb62fc2505",
+      "normalizedInputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalizedOutputSha256": "3615e6159865c95aa2529d4f1f29221164429e5b47d82439905bb1bb62fc2505"
+    },
+    {
+      "path": ".vite/build/codex-web-native/host.cjs",
+      "change": "add",
+      "inputSha256": null,
+      "outputSha256": "ccb1693d6e9738e9d23c73ae6c900a7d4cf598c81aec5f61b0294fb099275135",
+      "normalizedInputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalizedOutputSha256": "ccb1693d6e9738e9d23c73ae6c900a7d4cf598c81aec5f61b0294fb099275135"
+    },
+    {
+      "path": ".vite/build/codex-web-native/receipts.cjs",
+      "change": "add",
+      "inputSha256": null,
+      "outputSha256": "391eb0f26ba3fbb811fdcf4b65bc894ad08efbcefbde1438d6ae6514ad541cf2",
+      "normalizedInputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalizedOutputSha256": "391eb0f26ba3fbb811fdcf4b65bc894ad08efbcefbde1438d6ae6514ad541cf2"
+    },
+    {
+      "path": ".vite/build/codex-web-native/contract.cjs",
+      "change": "add",
+      "inputSha256": null,
+      "outputSha256": "d98d631bfd66870341fcc12b12987ceaca46d2eb5278cce457f427870e9b46f5",
+      "normalizedInputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalizedOutputSha256": "d98d631bfd66870341fcc12b12987ceaca46d2eb5278cce457f427870e9b46f5"
+    },
+    {
+      "path": ".vite/build/codex-web-native/ipc.cjs",
+      "change": "add",
+      "inputSha256": null,
+      "outputSha256": "565f20709d26b99c8fbdbcece984e0c84e2b8a5122cdc05e9036795c7c84a653",
+      "normalizedInputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalizedOutputSha256": "565f20709d26b99c8fbdbcece984e0c84e2b8a5122cdc05e9036795c7c84a653"
+    },
+    {
+      "path": "webview/assets/codex-web-native-renderer.mjs",
+      "change": "add",
+      "inputSha256": null,
+      "outputSha256": "cc1449b20a9076bbb0bf82756719e73189665bb849c0670389bea00dfa30525d",
+      "normalizedInputSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "normalizedOutputSha256": "cc1449b20a9076bbb0bf82756719e73189665bb849c0670389bea00dfa30525d"
+    }
+  ],
+  "remoteTransportEvidence": {
+    "file": ".vite/build/src-CCXHtyvY.js",
+    "sha256": "a42da38cbb14b28399f1d54fcf453bffc5e9802663e7e098f187c8378f4c7a40",
+    "symbols": [
+      "b$.open",
+      "S$.send",
+      "S$.handleServerMessage",
+      "C$",
+      "A$"
+    ]
+  },
+  "reviewDiffSha256": "c47760f2334a80bf4094de862168a4ad3573d1e06dec09cbf6e8a66069597d59",
+  "editRecipeSha256": "de3434cf6793dd2b3303aa1ca652c58f5c944bed6ab310cb40f8f925e98db3ca"
+}

@@ -49,6 +49,8 @@ export class SessionService extends EventEmitter {
   private attached = new Map<string, Promise<void>>();
   private running = new Set<Promise<void>>();
   private queued = new Map<string, Promise<void>>();
+  readonly captures = new Map<string, any>();
+  readonly captureStatuses = new Map<string, any>();
   constructor(
     readonly store: SessionStore,
     readonly backends: Backend[],
@@ -62,6 +64,7 @@ export class SessionService extends EventEmitter {
       const connection = factory(backend);
       this.connections.set(backend.id, connection);
       connection.on("connected", () => this.emit("backends"));
+      connection.on("capabilities", () => this.emit("backends"));
       connection.on("notification", (message) =>
         this.onNotification(backend.id, message),
       );
@@ -384,11 +387,12 @@ export class SessionService extends EventEmitter {
     const session = this.store.get(sessionId);
     this.backend(session.backendId);
     const native = session.conversationKind === "chatgpt";
+    const stopComputer = input.method === "computerUse/stop";
     if (
       !(
         native
-          ? ["chatgpt/send"]
-          : ["turn/start", "turn/steer", "turn/interrupt"]
+          ? ["chatgpt/send", "computerUse/stop"]
+          : ["turn/start", "turn/steer", "turn/interrupt", "computerUse/stop"]
       ).includes(input.method)
     )
       throw Object.assign(new Error("Unsupported command"), {
@@ -405,19 +409,22 @@ export class SessionService extends EventEmitter {
         { statusCode: 400 },
       );
     // Do not expose arbitrary app-server configuration or policy overrides.
-    const allowed = native
-      ? ["prompt"]
-      : input.method === "turn/interrupt"
-        ? ["turnId"]
-        : input.method === "turn/steer"
-          ? ["input", "expectedTurnId"]
-          : ["input", "model"];
+    const allowed = stopComputer
+      ? ["ownerId", "turnId"]
+      : native
+        ? ["prompt", "attachmentIds"]
+        : input.method === "turn/interrupt"
+          ? ["turnId"]
+          : input.method === "turn/steer"
+            ? ["input", "expectedTurnId"]
+            : ["input", "model"];
     if (Object.keys(params).some((k) => !allowed.includes(k)))
       throw Object.assign(new Error("Unsupported command parameter"), {
         statusCode: 400,
       });
     if (
       !native &&
+      !stopComputer &&
       input.method !== "turn/interrupt" &&
       (!Array.isArray(params.input) ||
         params.input.length === 0 ||
@@ -436,13 +443,31 @@ export class SessionService extends EventEmitter {
       });
     if (
       native &&
+      !stopComputer &&
       (typeof params.prompt !== "string" ||
-        !params.prompt.trim() ||
+        (!params.prompt.trim() && !params.attachmentIds?.length) ||
         params.prompt.length > 200000)
     )
       throw Object.assign(new Error("Provide a native ChatGPT text prompt"), {
         statusCode: 400,
       });
+    if (
+      native &&
+      params.attachmentIds !== undefined &&
+      (!Array.isArray(params.attachmentIds) ||
+        params.attachmentIds.length > 16 ||
+        params.attachmentIds.some((id: any) => !validId(id)))
+    )
+      throw Object.assign(new Error("Invalid native attachment identities"), {
+        statusCode: 400,
+      });
+    if (
+      stopComputer &&
+      (this.backend(session.backendId).transport.type !== "desktop" ||
+        params.ownerId !== session.computerUse?.ownerId ||
+        params.turnId !== session.computerUse?.turnId)
+    )
+      throw conflict("Computer Use owner changed; attach again");
     const digest = fingerprint({ sessionId, method: input.method, params });
     const existing = this.existing(input.clientCommandId, digest);
     if (existing) return existing;
@@ -592,6 +617,29 @@ export class SessionService extends EventEmitter {
     const session = this.store.get(id);
     if (!session.threadId && !session.conversationId) return;
     const connection = this.connections.get(session.backendId)!;
+    if (connection instanceof DesktopConnection)
+      for (const command of this.store
+        .commands(id)
+        .filter(
+          (c) =>
+            c.state === "unknown" &&
+            ["chatgpt/send", "computerUse/stop"].includes(c.method),
+        )) {
+        try {
+          const receipt = await connection.request("native/operation/read", {
+            commandId: command.id,
+          });
+          if (receipt.state === "complete")
+            this.record({
+              ...command,
+              state: "accepted",
+              result: receipt.result,
+              error: undefined,
+            });
+        } catch {
+          /* Preserve unknown; never replay. */
+        }
+      }
     if (session.conversationKind === "chatgpt") {
       const result = await connection.request("chatgpt/read", {
         conversationId: session.conversationId,
@@ -685,10 +733,21 @@ export class SessionService extends EventEmitter {
       connection = this.connections.get(id);
     if (session.backendId !== id || !(connection instanceof DesktopConnection))
       throw conflict("Select a Desktop session before uploading");
-    if (session.conversationKind === "chatgpt")
-      throw conflict(
-        "Native ChatGPT uploadChatGptConversationFile is not exposed by Desktop's local app-tools interface",
+    if (session.conversationKind === "chatgpt") {
+      if (connection.info?.capabilities?.chatgptAttachments !== true)
+        throw conflict(
+          "Native ChatGPT uploadChatGptConversationFile binding awaits the approved Desktop adapter installation",
+        );
+      if (!validId(params.uploadId))
+        throw Object.assign(new Error("A stable native uploadId is required"), {
+          statusCode: 400,
+        });
+      return connection.request(
+        "chatgpt/upload",
+        { ...params, conversationId: session.conversationId },
+        params.uploadId,
       );
+    }
     if (
       typeof params.data !== "string" ||
       params.data.length > Math.ceil((5 * 1024 * 1024) / 3) * 4
@@ -697,6 +756,61 @@ export class SessionService extends EventEmitter {
         statusCode: 400,
       });
     return connection.request("attachment/upload", params);
+  }
+  async nativeUploads(id: string): Promise<any> {
+    const session = this.store.get(id),
+      connection = this.connections.get(session.backendId);
+    if (
+      !(connection instanceof DesktopConnection) ||
+      session.conversationKind !== "chatgpt"
+    )
+      throw conflict("Select a native ChatGPT session");
+    const result = await connection.request("chatgpt/uploads", {
+      conversationId: session.conversationId,
+    });
+    this.change(id, "native.uploads", {}, { nativeUploads: result.uploads });
+    return result;
+  }
+  async computerUse(
+    id: string,
+    action: "attach" | "read" | "stop",
+    params: any = {},
+  ): Promise<any> {
+    const session = this.store.get(id),
+      connection = this.connections.get(session.backendId);
+    if (
+      !(connection instanceof DesktopConnection) ||
+      connection.info?.capabilities?.computerUse !== true
+    )
+      throw conflict(
+        "Computer Use awaits the approved Desktop adapter installation",
+      );
+    if (action === "attach")
+      return connection.request("computerUse/attach", {
+        conversationId: session.conversationId ?? session.threadId,
+        conversationKind: session.conversationKind ?? "codex",
+      });
+    const owner = session.computerUse;
+    if (
+      !owner ||
+      params.ownerId !== owner.ownerId ||
+      params.turnId !== owner.turnId
+    )
+      throw conflict("Computer Use owner changed; attach again");
+    if (action === "stop" && !validId(params.clientCommandId))
+      throw Object.assign(new Error("A stable stop command ID is required"), {
+        statusCode: 400,
+      });
+    if (action === "stop")
+      return this.submit(id, {
+        clientCommandId: params.clientCommandId,
+        method: "computerUse/stop",
+        params: { ownerId: owner.ownerId, turnId: owner.turnId },
+      });
+    return connection.request("computerUse/read", {
+      ownerId: owner.ownerId,
+      turnId: owner.turnId,
+    });
   }
 
   async remoteControl(
@@ -814,7 +928,32 @@ export class SessionService extends EventEmitter {
     // Claim synchronously before any I/O: only one device can answer.
     this.store.putApproval({ ...approval, state: "responding" });
     try {
-      const acknowledgement = connection.respond(approval.requestId, result);
+      let acknowledgement;
+      if (approval.method === "desktop/computerUse/requestApproval") {
+        if (
+          !(connection instanceof DesktopConnection) ||
+          session.computerUse?.ownerId !== approval.params.ownerId ||
+          session.computerUse?.turnId !== approval.params.turnId
+        )
+          throw conflict("Computer Use approval owner changed");
+        acknowledgement = connection
+          .request(
+            "computerUse/answer",
+            {
+              ownerId: approval.params.ownerId,
+              turnId: approval.params.turnId,
+              approvalId: approval.requestId,
+              result: { action: result.decision },
+            },
+            approval.id,
+          )
+          .then((receipt) => {
+            if (receipt.resolved) {
+              this.store.putApproval({ ...approval, state: "answered" });
+              this.change(session.id, "approval.answered", { id });
+            }
+          });
+      } else acknowledgement = connection.respond(approval.requestId, result);
       // Wait for serverRequest/resolved before declaring it answered.
       this.change(session.id, "approval.responding", { id });
       if (acknowledgement instanceof Promise)
@@ -870,6 +1009,102 @@ export class SessionService extends EventEmitter {
   private onNotification(backendId: string, message: any): void {
     if (this.stopped) return;
     const p = message.params ?? {};
+    if (
+      message.method === "desktop/capture/status" &&
+      this.backend(backendId).transport.type === "desktop"
+    ) {
+      this.captureStatuses.set(backendId, p);
+      this.emit("captureStatus", backendId, p);
+      return;
+    }
+    if (
+      message.method.startsWith("desktop/computerUse/") &&
+      this.backend(backendId).transport.type === "desktop"
+    ) {
+      const session = this.store.findConversation(
+        backendId,
+        p.conversationId,
+        p.conversationKind === "chatgpt" ? "chatgpt" : "codex",
+      );
+      if (!session) return;
+      if (message.method.endsWith("/capture")) {
+        if (
+          session.computerUse?.status === "active" &&
+          session.computerUse?.ownerId === p.ownerId &&
+          session.computerUse?.turnId === p.turnId &&
+          typeof p.dataUrl === "string" &&
+          p.dataUrl.length <= 1024 * 1024 &&
+          /^data:image\/(jpeg|png|webp);base64,/.test(p.dataUrl)
+        ) {
+          this.captures.set(session.id, p);
+          this.emit("capture", session.id, p);
+        }
+        return;
+      }
+      if (message.method.endsWith("/state")) {
+        if (p.status !== "active") this.captures.delete(session.id);
+        const offered = p.approvals ?? [],
+          current = this.store
+            .approvals(session.id)
+            .filter((a) => a.method === "desktop/computerUse/requestApproval");
+        for (const old of current)
+          if (
+            old.params.ownerId !== p.ownerId ||
+            !offered.some((a: any) => a.approvalId === old.requestId)
+          )
+            this.store.putApproval({
+              ...old,
+              state:
+                old.params.ownerId === p.ownerId &&
+                p.resolvedApprovals?.some(
+                  (a: any) => a.approvalId === old.requestId,
+                )
+                  ? "answered"
+                  : "stale",
+            });
+        for (const a of offered)
+          if (
+            !current.some(
+              (old) =>
+                old.params.ownerId === p.ownerId &&
+                old.requestId === a.approvalId,
+            )
+          )
+            this.store.putApproval({
+              id: randomUUID(),
+              sessionId: session.id,
+              epoch: this.connections.get(backendId)!.epoch,
+              requestId: a.approvalId,
+              method: "desktop/computerUse/requestApproval",
+              params: {
+                ownerId: p.ownerId,
+                turnId: p.turnId,
+                codexTurnMetadata: a.codexTurnMetadata ?? p.codexTurnMetadata,
+                nativeContext: a.params,
+                reason: a.params?.message ?? "Computer Use needs your approval",
+                availableDecisions: ["accept", "decline", "cancel"],
+              },
+              state: "pending",
+            });
+        this.change(session.id, message.method, {}, { computerUse: p });
+      }
+      return;
+    }
+    if (message.method === "desktop/chatgpt/uploads") {
+      const session = this.store.findConversation(
+        backendId,
+        p.conversationId,
+        "chatgpt",
+      );
+      if (session)
+        this.change(
+          session.id,
+          message.method,
+          {},
+          { nativeUploads: p.uploads },
+        );
+      return;
+    }
     if (message.method === "desktop/chatgpt/snapshot") {
       const native = this.store.findConversation(
         backendId,

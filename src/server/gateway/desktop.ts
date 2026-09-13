@@ -16,6 +16,13 @@ const methods: Record<string, string> = {
   "chatgpt/read": "desktop/chatgpt/read",
   "chatgpt/send": "desktop/chatgpt/send",
   "attachment/upload": "desktop/upload",
+  "chatgpt/upload": "desktop/chatgpt/upload",
+  "chatgpt/uploads": "desktop/chatgpt/uploads",
+  "native/operation/read": "desktop/native/operation/read",
+  "computerUse/attach": "desktop/computerUse/attach",
+  "computerUse/read": "desktop/computerUse/read",
+  "computerUse/answer": "desktop/computerUse/answer",
+  "computerUse/stop": "desktop/computerUse/stop",
 };
 
 /** A Desktop attachment, with no execution-runtime or process-launching code. */
@@ -78,9 +85,15 @@ export class DesktopConnection extends EventEmitter {
             p.reject(
               message.error.deliveryUnknown
                 ? new DeliveryUnknownError(message.error.message)
-                : new RpcError(message.error.message, -32000),
+                : Object.assign(new RpcError(message.error.message, -32000), {
+                    statusCode: 409,
+                  }),
             );
           else p.resolve(message.result);
+        } else if (message.method === "desktop/capabilities") {
+          for (const key of ["chatgptAttachments", "computerUse"])
+            this.info.capabilities[key] = message.params?.[key] === true;
+          this.emit("capabilities");
         } else if (message.method === "desktop/connection") {
           this.connected = message.params?.available === true;
           if (
@@ -95,6 +108,10 @@ export class DesktopConnection extends EventEmitter {
             "desktop/chatgpt/snapshot",
             "desktop/unavailable",
             "serverRequest/resolved",
+            "desktop/chatgpt/uploads",
+            "desktop/computerUse/state",
+            "desktop/computerUse/capture",
+            "desktop/capture/status",
           ].includes(message.method)
         ) {
           this.emit("notification", message);

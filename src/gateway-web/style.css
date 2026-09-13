@@ -576,3 +576,17 @@ pre {
     transition: none !important;
   }
 }
+/* Captures are transient, bounded images; controls remain in the session state. */
+.computer-use-panel {
+  border: 1px solid #385346;
+  border-radius: 12px;
+  padding: 12px;
+  margin: 16px 0;
+}
+.computer-use-panel img {
+  display: block;
+  max-width: 100%;
+  max-height: 480px;
+  object-fit: contain;
+  margin-bottom: 12px;
+}

@@ -1,5 +1,10 @@
 # Installed Desktop protocol evidence
 
+Scope correction: the registry findings below concern the two implemented local
+pipes. They do **not** prove absence of a usable unmodified-Desktop route. The
+[Remote dispatch assessment and optional-patch review](native-adapter-review.md)
+separate established limits, examined transport code, and unverified host dispatch.
+
 Inspected read-only: Codex Desktop app version **26.908.40834**, Windows package
 **26.908.4834.0**, main executable `app/ChatGPT.exe`. No installed code was changed,
 loaded into a replacement runtime, or incorporated into this repository.
@@ -85,9 +90,24 @@ Native photo/file handling is exported by `chatgpt-file-upload-abd0e2109411.js`:
 → `processChatGptFileUploadStream` (`fkr`, `/files/process_upload_stream`).
 The inspected `send_message_to_thread` schema accepts text `prompt`, target ID,
 and Codex-only model/thinking overrides; it has **no file/attachment argument**.
-The follower bus has no native upload method. The remaining integration gap is
-a local binding to this renderer upload operation and its attachment result,
-not Windows access or a need to test native uploads again.
+No native upload method was identified in the inspected follower registry. The optional in-process adapter
+adds an explicit native renderer dispatch case; it does not pretend the stock
+app-tools transport already exposes this operation. Loading is approval-gated.
+
+### Attachment-aware submission binding
+
+`$qr` is the text-oriented convenience path; its options omit attachments. The
+native attachment path is `Rqr({attachments,...})` → `Iqr` → `Jqr` → `Bqr` → `Gqr`
+→ the existing completion stream. `Jqr` needs the processed file ID, MIME type,
+name, size, **width and height**. With these fields it emits `multimodal_text` and
+`image_asset_pointer` parts (`sediment://file_*` or `file-service://...`).
+
+The adapter decodes image dimensions in the existing renderer, calls
+`uploadChatGptConversationFile`, and retains that native result. It asks `Iqr` to
+prepare the message, checkpoints the original native message ID and attachment
+references, and passes the same bundle to `Rqr.userCompletionMessages`. It uses
+the native model/thinking selection and checks the parent ID and busy atoms in
+the existing scope. It does not send a staged Windows path as prompt text.
 
 ## Computer Use
 
@@ -104,6 +124,42 @@ The renderer receives `computer-use-capture-updated` and the
 `remote-hosted-pip-*` presentation events. Neither the `codex-ipc` follower
 registration nor the inspected app-tools catalog exposes a subscription/binding
 to the existing Computer Use owner socket, its elicitation responses, or those
-capture/presentation events. That exact binding remains unimplemented; the
-bridge reports `computerUse: false` and never forwards generic helper requests
-or JavaScript execution to compensate.
+capture/presentation events. The proposed in-process patch now binds those exact
+objects and call sites; the stock external routes are not treated as sufficient.
+
+### Owner-session and event binding
+
+`profile.cjs` inserts observer calls after `ire` validates its original request,
+around `ore.requestApprovalForSender` and `ore.handleApprovalResponse`, and after
+the original helper response. `NativeHost` retains the original socket and copies
+the actual metadata for each request/approval. Responses invoke the original
+`handleApprovalResponse`, guarded by the original pending-map membership. Explicit
+stop calls the existing `Ge.closeActiveTurn` only if `Ge.hasActiveTurn` confirms the
+same session/turn. The observer socket is a separate authenticated pipe and has
+no helper-control methods; ending an observer never closes the original helper.
+
+The installed Windows SDK's `computer_use_client_base.js` calls `get_window_state`
+and consumes `result.screenshots[].{id,url,width,height}`. The adapter observes that
+already-issued request's result to obtain owner-scoped captures. It never issues
+an extra screenshot/control request. JPEG previews are bounded independently of
+approval/lifecycle snapshots; stale frames from ended owners are discarded.
+
+The two real `sendInlineMessageForView` dispatch points also publish capture and
+presentation status. `computer-use-capture-updated` commonly lacks a conversation
+ID. Such updates retain their request/webContents identity as Desktop-scoped status;
+they are not assigned to whichever conversation a viewer happens to have selected.
+The `remote-hosted-pip-{task,content-layout,browser-frame}-state-changed` events are
+associated only when their native thread identity matches a registered owner.
+
+### Loading and proof
+
+The optional prepared ASAR patch modifies the inspected main/renderer bundles and adds six
+adapter modules. Main dispatch reuses `je.callDynamicAppTool`; the added renderer
+case supplies actual lexical native function references. No exported closure is
+assumed remotely callable. The adapter listens only on a private named pipe with
+a separate local secret. A client must match the approved plan and ASAR hashes;
+stock/fixture discovery cannot enable the new production capabilities.
+
+See [installation, exact changes and rollback](native-adapter-installation.md).
+Source/ASAR preparation and fixtures are verified separately from live execution.
+The latter remains untested until the user approves installation and restart.

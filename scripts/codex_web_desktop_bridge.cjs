@@ -17,6 +17,11 @@ const {
   discoverNativeTools,
   NativeTools,
 } = require("./desktop/native-tools.cjs");
+const {
+  NativeAdapterClient,
+  loadApprovedNativeConfig,
+} = require("./desktop/native-client.cjs");
+const { NativeIntegration } = require("./desktop/native-integration.cjs");
 
 const MUTATIONS = new Set([
   "desktop/turn/start",
@@ -25,6 +30,9 @@ const MUTATIONS = new Set([
   "desktop/approval/respond",
   "desktop/upload",
   "desktop/chatgpt/send",
+  "desktop/chatgpt/upload",
+  "desktop/computerUse/answer",
+  "desktop/computerUse/stop",
 ]);
 const METHODS = new Set([
   ...MUTATIONS,
@@ -33,6 +41,10 @@ const METHODS = new Set([
   "desktop/read",
   "desktop/chatgpt/list",
   "desktop/chatgpt/read",
+  "desktop/chatgpt/uploads",
+  "desktop/native/operation/read",
+  "desktop/computerUse/attach",
+  "desktop/computerUse/read",
 ]);
 const NATIVE_GAPS = {
   chatgptAttachments:
@@ -147,6 +159,7 @@ class DesktopBridge {
     retryMs = 1000,
     tlsCa,
     rediscover,
+    nativeIntegration = null,
   }) {
     Object.assign(this, {
       session,
@@ -158,6 +171,7 @@ class DesktopBridge {
       retryMs,
       tlsCa,
       rediscover,
+      nativeIntegration,
     });
     this.socket = null;
     this.stopped = false;
@@ -173,8 +187,31 @@ class DesktopBridge {
       this.reconnectDesktop();
     });
     this.session.ipc.on("versionMismatch", () => this.session.ipc.close());
+    nativeIntegration?.on("capabilities", () =>
+      this.send({
+        method: "desktop/capabilities",
+        params: this.capabilities(),
+      }),
+    );
+    nativeIntegration?.on("uploads", (params) =>
+      this.send({ method: "desktop/chatgpt/uploads", params }),
+    );
+    nativeIntegration?.on("state", (state) =>
+      this.send({ method: "desktop/computerUse/state", params: state }),
+    );
+    nativeIntegration?.on("capture", (frame) => {
+      if (this.socket?.bufferedAmount < 128 * 1024)
+        this.send({ method: "desktop/computerUse/capture", params: frame });
+    });
+    nativeIntegration?.on("captureStatus", (status) =>
+      this.send({ method: "desktop/capture/status", params: status }),
+    );
   }
   capabilities() {
+    const native = this.nativeIntegration?.capabilities() ?? {
+      chatgptAttachments: false,
+      computerUse: false,
+    };
     return {
       codex: true,
       chatgpt: !!this.session.nativeTools?.originThreadId,
@@ -186,10 +223,25 @@ class DesktopBridge {
       files: false,
       remoteControl: false,
       createConversation: false,
-      gaps: NATIVE_GAPS,
+      gaps: {
+        ...(native.chatgptAttachments
+          ? {}
+          : {
+              chatgptAttachments:
+                "Awaiting approved in-process uploadChatGptConversationFile/Iqr/Rqr binding",
+            }),
+        ...(native.computerUse
+          ? {}
+          : {
+              computerUse:
+                "Awaiting approved original-owner ire/ore/capture binding",
+            }),
+      },
+      ...native,
     };
   }
   start() {
+    this.nativeIntegration?.client.start();
     this.open();
     this.nativePoll = setInterval(() => void this.refreshNative(), 3000);
   }
@@ -263,7 +315,7 @@ class DesktopBridge {
       ),
     );
     socket.on("message", async (raw, binary) => {
-      if (socket !== this.socket) return;
+      if (this.stopped || socket !== this.socket) return;
       let message;
       try {
         if (binary) throw new Error();
@@ -274,6 +326,9 @@ class DesktopBridge {
       }
       if (message.type === "desktop-ready") {
         this.ready = true;
+        this.nativeIntegration?.replay();
+        for (const status of this.nativeIntegration?.captureStatuses() ?? [])
+          this.send({ method: "desktop/capture/status", params: status });
         if (!this.session.ipc.clientId)
           this.send({
             method: "desktop/connection",
@@ -318,7 +373,7 @@ class DesktopBridge {
       this.inflight++;
       try {
         const result = await this.journal.run(message, () =>
-          this.dispatch(message.method, message.params ?? {}),
+          this.dispatch(message.method, message.params ?? {}, message.id),
         );
         if (this.socket === socket)
           this.send({ id: message.id, result: result ?? null });
@@ -367,10 +422,27 @@ class DesktopBridge {
     }
     this.socket.send(raw);
   }
-  async dispatch(method, p) {
+  async dispatch(method, p, commandId) {
     if (!p || typeof p !== "object" || Array.isArray(p))
       throw new DesktopError("INVALID_INPUT", "Invalid Desktop parameters");
     switch (method) {
+      case "desktop/chatgpt/upload":
+        return this.binding().upload(p, commandId);
+      case "desktop/chatgpt/uploads":
+        await this.binding().recover();
+        return {
+          uploads: this.binding().publicUploads(validId(p.conversationId)),
+        };
+      case "desktop/native/operation/read":
+        return this.binding().operation(p.commandId);
+      case "desktop/computerUse/attach":
+        return this.binding().attach(p);
+      case "desktop/computerUse/read":
+        return this.binding().control("sync", p);
+      case "desktop/computerUse/answer":
+        return this.binding().control("answer", p, commandId);
+      case "desktop/computerUse/stop":
+        return this.binding().control("stop", p, commandId);
       case "desktop/list":
         return this.session.list();
       case "desktop/attach":
@@ -447,16 +519,32 @@ class DesktopBridge {
             "NATIVE_IDENTITY",
             "Attach and reconcile the native ChatGPT conversation first",
           );
+        if (p.attachmentIds?.length) {
+          if (
+            !Array.isArray(p.attachmentIds) ||
+            p.attachmentIds.length > 16 ||
+            typeof p.prompt !== "string" ||
+            Object.keys(p).some(
+              (k) => !["conversationId", "prompt", "attachmentIds"].includes(k),
+            )
+          )
+            throw new DesktopError(
+              "INVALID_INPUT",
+              "Invalid native image message",
+            );
+          return this.binding().send(p, commandId);
+        }
         if (
           typeof p.prompt !== "string" ||
           !p.prompt.trim() ||
           p.prompt.length > 200000 ||
-          Object.keys(p).some((k) => !["conversationId", "prompt"].includes(k))
+          Object.keys(p).some(
+            (k) => !["conversationId", "prompt", "attachmentIds"].includes(k),
+          )
         )
           throw new DesktopError(
             "INVALID_INPUT",
-            "Native ChatGPT currently accepts text only. " +
-              NATIVE_GAPS.chatgptAttachments,
+            "Provide a text prompt or processed native attachment IDs; image submissions require the approved native binding",
           );
         const target = await this.native().call("read_thread", {
           threadId: id,
@@ -491,6 +579,14 @@ class DesktopBridge {
       );
     return this.session.nativeTools;
   }
+  binding() {
+    if (!this.nativeIntegration)
+      throw new DesktopError(
+        "NATIVE_DISABLED",
+        "Native photos and Computer Use require the separately approved in-process adapter; see the prepared patch and rollback plan",
+      );
+    return this.nativeIntegration;
+  }
   reconnectDesktop() {
     if (this.localRetry || this.stopped) return;
     this.localRetry = setTimeout(async () => {
@@ -516,10 +612,39 @@ class DesktopBridge {
     clearTimeout(this.localRetry);
     clearInterval(this.nativePoll);
     this.socket?.close(1000);
+    await this.nativeIntegration?.close();
     this.session.close();
     while (this.inflight || this.pollingNative)
       await new Promise((resolve) => setTimeout(resolve, 25));
     this.journal.close();
+  }
+}
+/** Compatibility is optional: a bad approval file must not stop the stock bridge. */
+function optionalNativeIntegration({
+  filename,
+  session,
+  journal,
+  contextThreadId,
+  diagnose = console.error,
+}) {
+  if (!filename) return null;
+  try {
+    return new NativeIntegration({
+      session,
+      journal,
+      client: new NativeAdapterClient(
+        loadApprovedNativeConfig(filename),
+        contextThreadId,
+      ),
+    });
+  } catch (error) {
+    // JSON parse errors can contain configuration content; never log that content.
+    diagnose(
+      error?.code === "ENOENT"
+        ? "Optional native compatibility mode disabled: approval configuration was not found. The unmodified-Desktop bridge remains available."
+        : "Optional native compatibility mode disabled: approval configuration could not be validated. The unmodified-Desktop bridge remains available.",
+    );
+    return null;
   }
 }
 async function main() {
@@ -527,7 +652,13 @@ async function main() {
     options = {};
   for (let i = 0; i < args.length; i += 2) {
     if (
-      !["--gateway", "--backend", "--token-env", "--state"].includes(args[i]) ||
+      ![
+        "--gateway",
+        "--backend",
+        "--token-env",
+        "--state",
+        "--native-adapter-config",
+      ].includes(args[i]) ||
       !args[i + 1]
     )
       throw new Error(
@@ -578,6 +709,15 @@ async function main() {
       backendId: options["--backend"],
       token,
       journal,
+      nativeIntegration: optionalNativeIntegration({
+        filename: options["--native-adapter-config"],
+        session,
+        journal,
+        contextThreadId:
+          session.nativeTools?.originThreadId ??
+          process.env.CODEX_WEB_DESKTOP_CONTEXT_THREAD ??
+          process.env.CODEX_THREAD_ID,
+      }),
       rediscover: async () => {
         const next = await discoverDesktop();
         Object.assign(info, next);
@@ -591,6 +731,9 @@ async function main() {
     });
     console.log(
       `Attached to Codex Desktop ${info.version} (Windows package ${info.packageVersion ?? "unpackaged"}) at ${info.endpoint}`,
+    );
+    bridge.nativeIntegration?.client.on("diagnostic", (message) =>
+      console.error(`Native adapter is disabled or unavailable: ${message}`),
     );
     bridge.start();
     launched = true;
@@ -612,4 +755,5 @@ module.exports = {
   nativeRows,
   isChatGpt,
   NATIVE_GAPS,
+  optionalNativeIntegration,
 };

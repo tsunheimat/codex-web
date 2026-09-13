@@ -1,0 +1,1465 @@
+diff --git a/.vite/build/main-D8abTQQE.js b/.vite/build/main-D8abTQQE.js
+--- a/.vite/build/main-D8abTQQE.js
++++ b/.vite/build/main-D8abTQQE.js
+@@ -1,3 +1,4 @@
++const codexWebNative = require("./codex-web-native/entry.cjs");
+ const e = require("./src-KMpTO78a.js"),
+   t = require("./desktop-open-path-queue-BtqbTQxD.js"),
+   n = require("./src-CCXHtyvY.js"),
+@@ -6631,6 +6632,12 @@ async function ire({
+       throw Error(`Unsupported Computer Use native pipe method`);
+     let m = are(a.params),
+       h = Ka(m.method, m.params, m.codexTurnMetadata);
++    codexWebNative.observeOwner(
++      c,
++      m.codexTurnMetadata,
++      (response) => i.handleApprovalResponse(response),
++      m.method,
++    );
+     ((d = Wne(m.codexTurnMetadata)),
+       (f = h),
+       sre({
+@@ -6646,9 +6653,12 @@ async function ire({
+       await r()
+     ).request(m.method, m.params, {
+       codexTurnMetadata: m.codexTurnMetadata,
+-      createElicitation: (e) => i.requestApprovalForSender(s, e),
++      createElicitation: (e) =>
++        codexWebNative.elicit(i, s, c, m.codexTurnMetadata, e),
+     });
+-    ((p = `completed`), s({ id: l, jsonrpc: `2.0`, result: g }));
++    (codexWebNative.observeResult(c, m.codexTurnMetadata, m.method, g),
++      (p = `completed`),
++      s({ id: l, jsonrpc: `2.0`, result: g }));
+   } catch (e) {
+     (u != null && p == null && (p = `failed`),
+       s({
+@@ -6686,6 +6696,7 @@ function ore(e) {
+   let t = new Map();
+   return {
+     handleApprovalResponse: (n) => {
++      codexWebNative.observeApprovalResponse(n);
+       let r = n.id;
+       if (typeof r != `string` || !r.startsWith(Za)) return !1;
+       let i = t.get(r);
+@@ -6717,7 +6728,12 @@ function ore(e) {
+         }, ere);
+         (c.unref(),
+           t.set(o, { reject: a, resolve: i, timeout: c, tool: s }),
+-          n({ id: o, jsonrpc: `2.0`, method: $ne, params: r }));
++          (codexWebNative.observeApproval(
++            n,
++            { id: o, jsonrpc: `2.0`, method: $ne, params: r },
++            () => t.has(o),
++          ),
++          n({ id: o, jsonrpc: `2.0`, method: $ne, params: r })));
+       }),
+   };
+ }
+@@ -11859,6 +11875,7 @@ var Jae = 1e3,
+         this.sender.sendCritical(e, { channel: t, payload: n });
+     }
+     sendInlineMessageForView(e, t) {
++      codexWebNative.observePresentation(e, t);
+       this.sendInline(e, r.ot, t);
+     }
+     acknowledge(e, t, n) {
+@@ -186384,6 +186401,7 @@ var b6e = class {
+       this.pendingMessages.set(e.id, i));
+   }
+   sendInlineMessageForView(e, t) {
++    codexWebNative.observePresentation(e, t);
+     if (this.options.chunkedMessageSender != null) {
+       this.options.chunkedMessageSender.sendInlineMessageForView(e, t);
+       return;
+@@ -189735,6 +189753,12 @@ async function p8e() {
+         .isBrowserPresentedForConversation(e, t) ?? !1,
+   );
+   let je = Ae.getWindowContext();
++  codexWebNative.bindAppTools(l, (params) =>
++    je.callDynamicAppTool(
++      { hostId: "local", params },
++      new AbortController().signal,
++    ),
++  );
+   Oe != null &&
+     (je.setDynamicAppToolsPipePath(Oe.pipePath),
+     L.add(() => {
+@@ -190014,7 +190038,7 @@ async function p8e() {
+     codexHome: H.codexHome,
+     onAnalyticsEvent: He,
+   });
+-  ((Ee = Ge.hasActiveTurn),
++  ((codexWebNative.bindComputerUse(Ge), (Ee = Ge.hasActiveTurn)),
+     L.add(
+       Ice({
+         appServerConnection: Pe(),
+
+diff --git a/webview/assets/app-initial-d9bed9d614d8.js b/webview/assets/app-initial-d9bed9d614d8.js
+--- a/webview/assets/app-initial-d9bed9d614d8.js
++++ b/webview/assets/app-initial-d9bed9d614d8.js
+@@ -1,3 +1,4 @@
++import { dispatchNativeRenderer as codexWebNativeRenderer } from "./codex-web-native-renderer.mjs";
+ const __vite__mapDeps = (
+   i,
+   m = __vite__mapDeps,
+@@ -303813,6 +303814,53 @@ async function g0i({
+           });
+         break;
+       }
++      case `codex_web_native_v1`:
++        try {
++          y = LW(
++            await codexWebNativeRenderer(c.arguments, {
++              target: (id) => oJr(e, id, !0),
++              upload: async (file) =>
++                (
++                  await import("./chatgpt-file-upload-abd0e2109411.js")
++                ).uploadChatGptConversationFile(e, file, {
++                  storeInLibrary: !1,
++                }),
++              prepare: (p) =>
++                Iqr({
++                  ...p,
++                  systemHints: e.get(bR, Xor(c.arguments.conversationId)),
++                }),
++              submit: async (p) => {
++                const id = Xor(p.conversationId);
++                if (e.get(xR, id) || e.get(JCr, id) || NP(e.get(mF, id)))
++                  throw Error(
++                    "Native ChatGPT conversation is already responding",
++                  );
++                const model = e.get(xBr, id);
++                e.set(xR, id, !0);
++                try {
++                  await Rqr(e, {
++                    conversationId: id,
++                    prompt: p.prompt,
++                    attachments: p.attachments,
++                    userCompletionMessages: p.prepared.bundle,
++                    parentMessageId: p.prepared.parentMessageId,
++                    isTemporaryChat: !1,
++                    model: model.slug,
++                    thinkingEffort: model.thinkingEffort,
++                    systemHints: e.get(bR, id),
++                  });
++                  return { messageId: p.prepared.bundle.message.id };
++                } finally {
++                  e.set(xR, id, !1);
++                }
++              },
++            }),
++          );
++        } catch (error) {
++          y = $C(error.message);
++        }
++        break;
+       case wj:
+         y = await eTi({
+           scope: e,
+
+diff --git a/.vite/build/codex-web-native/entry.cjs b/.vite/build/codex-web-native/entry.cjs
+new file mode 100644
+--- /dev/null
++++ b/.vite/build/codex-web-native/entry.cjs
+@@ -0,0 +1,275 @@
++// Entry point for the proposed in-process Desktop patch. No network listener.
++// Absence of the separately approved configuration leaves every hook inert.
++const fs = require("node:fs");
++const path = require("node:path");
++const net = require("node:net");
++const { createHash, timingSafeEqual, randomUUID } = require("node:crypto");
++const { FrameReader, encodeFrame } = require("./ipc.cjs");
++const { NativeHost } = require("./host.cjs");
++const { NativeReceipts } = require("./receipts.cjs");
++const {
++  BINDING_ID,
++  METHODS,
++  FRAME_LIMIT,
++  checkedId,
++} = require("./contract.cjs");
++let host,
++  approval,
++  electron,
++  computerUse,
++  clients = new Set();
++function equal(a, b) {
++  if (typeof a !== "string" || typeof b !== "string") return false;
++  const x = Buffer.from(a),
++    y = Buffer.from(b);
++  return x.length === y.length && timingSafeEqual(x, y);
++}
++function write(client, message, capture = false) {
++  if (!client.socket.writable) return;
++  if (capture && client.socket.writableLength > 65536) return;
++  if (!capture && client.socket.writableLength > 2 * 1024 * 1024) {
++    client.socket.destroy();
++    return;
++  }
++  try {
++    client.socket.write(encodeFrame(message, FRAME_LIMIT));
++  } catch {
++    client.socket.destroy();
++  }
++}
++function normalizeImage(url) {
++  const image = electron.nativeImage.createFromDataURL(url),
++    size = image.getSize();
++  if (!size.width || !size.height) return null;
++  const scale = Math.min(1, 1600 / size.width, 1000 / size.height);
++  return (
++    "data:image/jpeg;base64," +
++    image
++      .resize({
++        width: Math.max(1, Math.round(size.width * scale)),
++        height: Math.max(1, Math.round(size.height * scale)),
++      })
++      .toJPEG(65)
++      .toString("base64")
++  );
++}
++function decodeToolResult(result) {
++  if (!result?.success)
++    throw new Error("Native renderer operation was not acknowledged");
++  return JSON.parse(
++    result.contentItems.find((i) => i.type === "inputText").text,
++  );
++}
++function bindAppTools(appElectron, callTool) {
++  electron = appElectron;
++  const directory = path.join(
++    electron.app.getPath("userData"),
++    "codex-web-native",
++  );
++  try {
++    approval = JSON.parse(
++      fs.readFileSync(path.join(directory, "approved.json"), "utf8"),
++    );
++  } catch {
++    return;
++  }
++  if (
++    approval.enabled !== true ||
++    approval.bindingId !== BINDING_ID ||
++    approval.desktopVersion !== electron.app.getVersion() ||
++    !/^[a-f0-9]{64}$/.test(approval.planSha256 ?? "") ||
++    typeof approval.token !== "string" ||
++    approval.token.length < 32 ||
++    !/^\\\\\.\\pipe\\codex-web-native-[\da-f-]+$/.test(approval.endpoint)
++  )
++    return;
++  const actual = createHash("sha256")
++    .update(fs.readFileSync(path.join(process.resourcesPath, "app.asar")))
++    .digest("hex");
++  if (actual !== approval.patchedArchiveSha256) return;
++  let contextThreadId;
++  host = new NativeHost({
++    receipts: new NativeReceipts(path.join(directory, "receipts")),
++    normalizeImage,
++    renderer: async (request) => {
++      const id = randomUUID();
++      return decodeToolResult(
++        await callTool({
++          namespace: "codex_app",
++          tool: "codex_web_native_v1",
++          arguments: request,
++          callId: id,
++          threadId: contextThreadId,
++          turnId: "codex-web-native-adapter",
++        }),
++      );
++    },
++  });
++  if (computerUse) bindComputerUse(computerUse);
++  host.on("state", (state) => {
++    for (const client of clients)
++      if (client.owners.has(state.ownerId))
++        write(client, { event: "native/cu/state", data: state });
++  });
++  host.on("capture", (frame) => {
++    for (const client of clients)
++      if (client.owners.has(frame.ownerId))
++        client.frames.set(frame.ownerId, frame);
++  });
++  host.on("captureStatus", (status) => {
++    for (const client of clients)
++      if (client.authenticated)
++        write(client, { event: "native/capture/status", data: status });
++  });
++  const server = net.createServer((socket) => {
++    const client = {
++      socket,
++      owners: new Set(),
++      frames: new Map(),
++      authenticated: false,
++      inflight: 0,
++    };
++    clients.add(client);
++    const timeout = setTimeout(() => socket.destroy(), 5000);
++    const frames = setInterval(() => {
++      for (const frame of client.frames.values())
++        write(client, { event: "native/cu/capture", data: frame }, true);
++      client.frames.clear();
++    }, 200);
++    const reader = new FrameReader(async (message) => {
++      try {
++        checkedId(message.id);
++        if (!client.authenticated) {
++          if (
++            message.method !== "native/hello" ||
++            !equal(message.params?.token, approval.token) ||
++            message.params.bindingId !== BINDING_ID ||
++            message.params.planSha256 !== approval.planSha256
++          )
++            throw new Error("Native authentication rejected");
++          contextThreadId = checkedId(message.params.contextThreadId);
++          await host.verify();
++          client.authenticated = true;
++          clearTimeout(timeout);
++          write(client, {
++            id: message.id,
++            result: {
++              ...host.capabilities(),
++              desktopVersion: approval.desktopVersion,
++              planSha256: approval.planSha256,
++              patchedArchiveSha256: actual,
++              captureStatuses: [...host.captureStatuses.values()],
++            },
++          });
++          return;
++        }
++        if (!METHODS.has(message.method) || client.inflight >= 16)
++          throw new Error("Native operation unavailable");
++        client.inflight++;
++        try {
++          const result = await host.dispatch(
++            message.method,
++            message.params ?? {},
++          );
++          if (
++            message.method === "native/cu/attach" ||
++            message.method === "native/cu/sync"
++          ) {
++            client.owners.add(result.ownerId);
++            const latest = host.owners.get(result.ownerId)?.capture;
++            if (latest) client.frames.set(result.ownerId, latest);
++          }
++          write(client, { id: message.id, result });
++        } finally {
++          client.inflight--;
++        }
++      } catch (error) {
++        if (!client.authenticated) {
++          socket.destroy();
++          return;
++        }
++        write(client, {
++          id: message.id,
++          error: {
++            message: error.message,
++            deliveryUnknown: error.deliveryUnknown === true,
++          },
++        });
++      }
++    }, FRAME_LIMIT);
++    socket.on("data", (chunk) => {
++      try {
++        reader.push(chunk);
++      } catch {
++        socket.destroy();
++      }
++    });
++    socket.on("error", () => {});
++    socket.on("close", () => {
++      clearTimeout(timeout);
++      clearInterval(frames);
++      clients.delete(client);
++    });
++    // Closing this observer channel never closes a helper, rejects its approval,
++    // or cancels an in-flight upload/message operation.
++  });
++  server.on("error", () => {
++    host.ready = false;
++  });
++  server.listen(approval.endpoint);
++  electron.app.on("will-quit", () => {
++    for (const c of clients) c.socket.destroy();
++    server.close();
++  });
++}
++function bindComputerUse(service) {
++  computerUse = service;
++  if (!host) return;
++  const originalClose = service.closeActiveTurn;
++  host.closeActiveTurn = originalClose;
++  host.hasActiveTurn = service.hasActiveTurn;
++  service.closeActiveTurn = async (metadata) => {
++    const result = await originalClose(metadata);
++    if (result)
++      for (const owner of host.owners.values())
++        if (
++          owner.metadata.session_id === metadata.sessionId &&
++          owner.turnId === metadata.turnId
++        )
++          host.end(owner, "completed");
++    return result;
++  };
++}
++module.exports = {
++  bindAppTools,
++  bindComputerUse,
++  observeOwner: (...args) => {
++    try {
++      return host?.observeOwner(...args);
++    } catch {}
++  },
++  observeResult: (...args) => {
++    try {
++      host?.observeResult(...args);
++    } catch {}
++  },
++  observeApproval: (...args) => {
++    try {
++      host?.observeApproval(...args);
++    } catch {}
++  },
++  observeApprovalResponse: (...args) => {
++    try {
++      host?.observeApprovalResponse(...args);
++    } catch {}
++  },
++  observePresentation: (...args) => {
++    try {
++      host?.observePresentation(...args);
++    } catch {}
++  },
++  elicit: (bridge, sender, socket, metadata, params) =>
++    host
++      ? host.elicit(bridge, sender, socket, metadata, params)
++      : bridge.requestApprovalForSender(sender, params),
++};
+
+diff --git a/.vite/build/codex-web-native/host.cjs b/.vite/build/codex-web-native/host.cjs
+new file mode 100644
+--- /dev/null
++++ b/.vite/build/codex-web-native/host.cjs
+@@ -0,0 +1,470 @@
++const { EventEmitter } = require("node:events");
++const { randomUUID } = require("node:crypto");
++const { NativeReceipts } = require("./receipts.cjs");
++const {
++  BINDING_ID,
++  CAPTURE_LIMIT,
++  checkedId,
++  nativeError,
++} = require("./contract.cjs");
++
++/** Runs inside the existing Desktop main process. Never opens a helper connection. */
++class NativeHost extends EventEmitter {
++  constructor({
++    renderer,
++    receipts,
++    normalizeImage = (url) => url,
++    closeActiveTurn,
++    hasActiveTurn,
++  }) {
++    super();
++    this.renderer = renderer;
++    this.receipts = receipts ?? new NativeReceipts();
++    this.normalizeImage = normalizeImage;
++    this.closeActiveTurn = closeActiveTurn;
++    this.hasActiveTurn = hasActiveTurn;
++    this.owners = new Map();
++    this.sockets = new WeakMap();
++    this.senders = new WeakMap();
++    this.captureStatuses = new Map();
++    this.sequence = 0;
++    this.ready = false;
++    this.instanceId = randomUUID();
++  }
++  async verify() {
++    const reply = await this.renderer({ op: "binding/read" });
++    this.ready =
++      reply?.bindingId === BINDING_ID && reply.photoSubmission === true;
++    return this.ready;
++  }
++  capabilities() {
++    return {
++      bindingId: BINDING_ID,
++      instanceId: this.instanceId,
++      chatgptAttachments: this.ready,
++      computerUse:
++        this.ready &&
++        typeof this.closeActiveTurn === "function" &&
++        typeof this.hasActiveTurn === "function",
++    };
++  }
++  attachment(id, conversationId) {
++    for (const row of this.receipts.records.values())
++      if (
++        row.method === "native/photo/upload" &&
++        row.state === "complete" &&
++        row.conversationId === conversationId &&
++        row.result.attachment.id === id
++      )
++        return row.result.attachment;
++    throw nativeError(
++      "Attachment is not a completed native upload for this conversation",
++      false,
++    );
++  }
++  async dispatch(method, params) {
++    if (!this.ready && !(await this.verify()))
++      throw nativeError("Approved native renderer binding is not ready", false);
++    if (method === "native/operation/read")
++      return this.operation(checkedId(params.commandId));
++    if (method === "native/cu/attach") {
++      checkedId(params.conversationId);
++      const owners = [...this.owners.values()].filter(
++        (o) =>
++          o.conversationId === params.conversationId &&
++          o.conversationKind === params.conversationKind &&
++          this.active(o),
++      );
++      if (owners.length !== 1)
++        throw nativeError(
++          "No unique existing Computer Use owner matches this conversation and active turn",
++          false,
++        );
++      return this.snapshot(owners[0]);
++    }
++    if (method === "native/cu/sync") {
++      const owner = this.owners.get(params.ownerId);
++      if (!owner || owner.turnId !== params.turnId)
++        throw nativeError("Computer Use owner no longer exists", false);
++      return this.snapshot(owner);
++    }
++    if (
++      ![
++        "native/photo/upload",
++        "native/message/send",
++        "native/cu/answer",
++        "native/cu/stop",
++      ].includes(method)
++    )
++      throw nativeError("Native operation is not exposed", false);
++    return this.receipts.run(method, params, async (checkpoint) => {
++      if (method === "native/photo/upload") {
++        checkedId(params.conversationId);
++        checkedId(params.stageId);
++        if (
++          typeof params.data !== "string" ||
++          params.data.length > 6990510 ||
++          !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(
++            params.mimeType,
++          )
++        )
++          throw nativeError("Invalid staged native photo", false);
++        const result = await this.renderer({
++          op: "photo/upload",
++          conversationId: params.conversationId,
++          stageId: params.stageId,
++          name: params.name,
++          mimeType: params.mimeType,
++          data: params.data,
++        });
++        if (
++          result?.conversationId !== params.conversationId ||
++          typeof result.attachment?.id !== "string" ||
++          !result.attachment.width ||
++          !result.attachment.height
++        )
++          throw nativeError(
++            "Native upload handler returned no processed image identity",
++            true,
++          );
++        return result;
++      }
++      if (method === "native/message/send") {
++        checkedId(params.conversationId);
++        if (
++          typeof params.prompt !== "string" ||
++          params.prompt.length > 200000 ||
++          !Array.isArray(params.attachmentIds) ||
++          params.attachmentIds.length > 16 ||
++          new Set(params.attachmentIds).size !== params.attachmentIds.length ||
++          (!params.prompt.trim() && !params.attachmentIds.length)
++        )
++          throw nativeError("Invalid native message", false);
++        const attachments = params.attachmentIds.map((id) =>
++          this.attachment(id, params.conversationId),
++        );
++        const prepared = await this.renderer({
++          op: "message/prepare",
++          conversationId: params.conversationId,
++          prompt: params.prompt,
++          attachments,
++        });
++        if (
++          !prepared?.bundle?.message?.id ||
++          prepared.conversationId !== params.conversationId
++        )
++          throw nativeError(
++            "Native message preparation returned no message identity",
++            true,
++          );
++        const messageId = prepared.bundle.message.id;
++        checkpoint({
++          prepared,
++          messageId,
++          attachmentIds: params.attachmentIds,
++        });
++        // The prepared message (including native image_asset_pointer parts) is
++        // passed intact to Rqr through userCompletionMessages.
++        await this.renderer({
++          op: "message/submit",
++          conversationId: params.conversationId,
++          prompt: params.prompt,
++          attachments,
++          prepared,
++        });
++        return {
++          conversationId: params.conversationId,
++          messageId,
++          attachmentIds: params.attachmentIds,
++          attachmentReferences: prepared.references,
++          submitted: true,
++        };
++      }
++      const owner = this.owner(params);
++      if (method === "native/cu/answer") {
++        const request = owner.approvals.get(params.approvalId);
++        if (
++          !request?.isPending() ||
++          !["accept", "decline", "cancel"].includes(params.result?.action) ||
++          Object.keys(params.result).length !== 1
++        )
++          throw nativeError(
++            "Computer Use approval is stale or the decision is invalid",
++            false,
++          );
++        // This invokes the original ore.handleApprovalResponse for the original
++        // request ID. The existing Desktop/helper sender remains connected.
++        const response = {
++          id: request.id,
++          jsonrpc: "2.0",
++          result: { action: params.result.action },
++        };
++        this.observeApprovalResponse(response);
++        owner.respond(response);
++        this.reconcileApprovals(owner);
++        return {
++          ownerId: owner.id,
++          approvalId: request.id,
++          resolved: !request.isPending(),
++        };
++      }
++      const stopped = await this.closeActiveTurn({
++        sessionId: owner.metadata.session_id,
++        turnId: owner.metadata.turn_id,
++      });
++      if (!stopped)
++        throw nativeError("The Computer Use owner turn has changed", false);
++      this.end(owner, "stopped");
++      return { ownerId: owner.id, turnId: owner.turnId, stopped: true };
++    });
++  }
++  async operation(id) {
++    let row = this.receipts.get(id);
++    if (!row) return { state: "absent", commandId: id };
++    if (
++      row.state === "unknown" &&
++      row.method === "native/message/send" &&
++      row.messageId
++    ) {
++      const observed = await this.renderer({
++        op: "message/find",
++        conversationId: row.conversationId,
++        messageId: row.messageId,
++        attachmentIds: row.attachmentIds,
++      });
++      if (observed?.found)
++        row = this.receipts.put({
++          ...row,
++          state: "complete",
++          result: {
++            conversationId: row.conversationId,
++            messageId: row.messageId,
++            attachmentIds: row.attachmentIds,
++            submitted: true,
++            reconciled: true,
++          },
++        });
++    }
++    return {
++      commandId: id,
++      state: row.state,
++      result: row.result,
++      error: row.error,
++      messageId: row.messageId,
++    };
++  }
++  observeOwner(socket, metadata, respond, method) {
++    if (!metadata?.session_id || !metadata.turn_id) return null;
++    const conversationId =
++      metadata.thread_id ?? metadata.threadId ?? metadata.session_id;
++    const kind = metadata.thread_source === "chatgpt" ? "chatgpt" : "codex";
++    let owner = this.sockets.get(socket);
++    if (
++      owner &&
++      (owner.turnId !== metadata.turn_id ||
++        owner.conversationId !== conversationId)
++    )
++      this.end(owner, "replaced");
++    if (!owner || owner.ended) {
++      owner = {
++        id: randomUUID(),
++        conversationId,
++        conversationKind: kind,
++        turnId: metadata.turn_id,
++        metadata: structuredClone(metadata),
++        socket,
++        respond,
++        approvals: new Map(),
++        resolvedApprovals: new Map(),
++        status: "active",
++        presentations: {},
++        revision: 0,
++      };
++      this.owners.set(owner.id, owner);
++      this.sockets.set(socket, owner);
++      socket.once?.("close", () => this.end(owner, "owner-disconnected"));
++    }
++    owner.metadata = structuredClone(metadata);
++    owner.respond = respond;
++    if (method === "end_turn") this.end(owner, "completed");
++    else this.changed(owner);
++    return owner;
++  }
++  elicit(approvalBridge, sender, socket, metadata, params) {
++    const owner = this.observeOwner(socket, metadata, (message) =>
++      approvalBridge.handleApprovalResponse(message),
++    );
++    const wrapped = (message) => sender(message);
++    this.senders.set(wrapped, owner);
++    return approvalBridge
++      .requestApprovalForSender(wrapped, params)
++      .finally(() => {
++        if (owner) this.reconcileApprovals(owner);
++      });
++  }
++  observeApproval(sender, message, isPending) {
++    const owner = this.senders.get(sender);
++    if (!owner || owner.ended) return;
++    owner.approvals.set(message.id, {
++      id: message.id,
++      params: structuredClone(message.params),
++      codexTurnMetadata: structuredClone(owner.metadata),
++      isPending,
++    });
++    this.changed(owner);
++  }
++  reconcileApprovals(owner) {
++    for (const [id, request] of owner.approvals)
++      if (!request.isPending()) owner.approvals.delete(id);
++    this.changed(owner);
++  }
++  observeApprovalResponse(message) {
++    for (const owner of this.owners.values()) {
++      const request = owner.approvals.get(message.id);
++      if (!request?.isPending()) continue;
++      owner.resolvedApprovals.set(message.id, {
++        approvalId: message.id,
++        result: message.result,
++        error: message.error,
++      });
++      queueMicrotask(() => this.reconcileApprovals(owner));
++    }
++  }
++  active(owner) {
++    return (
++      !owner.ended &&
++      !owner.socket.destroyed &&
++      this.hasActiveTurn?.({
++        sessionId: owner.metadata.session_id,
++        turnId: owner.turnId,
++      }) === true
++    );
++  }
++  owner(params) {
++    const owner = this.owners.get(params.ownerId);
++    if (!owner || owner.turnId !== params.turnId || !this.active(owner))
++      throw nativeError(
++        "Computer Use owner or active turn changed; attach again",
++        false,
++      );
++    return owner;
++  }
++  snapshot(owner) {
++    return {
++      ownerId: owner.id,
++      conversationId: owner.conversationId,
++      conversationKind: owner.conversationKind,
++      turnId: owner.turnId,
++      codexTurnMetadata: structuredClone(owner.metadata),
++      status: owner.ended
++        ? owner.status
++        : this.active(owner)
++          ? owner.status
++          : "unavailable",
++      revision: owner.revision,
++      presentations: owner.presentations,
++      resolvedApprovals: [...owner.resolvedApprovals.values()],
++      approvals: [...owner.approvals.values()]
++        .filter((r) => r.isPending())
++        .map((r) => ({
++          approvalId: r.id,
++          params: r.params,
++          codexTurnMetadata: r.codexTurnMetadata,
++        })),
++    };
++  }
++  changed(owner) {
++    owner.revision = ++this.sequence;
++    this.emit("state", this.snapshot(owner));
++  }
++  end(owner, reason) {
++    if (owner.ended) return;
++    owner.ended = true;
++    owner.status = reason;
++    owner.approvals.clear();
++    delete owner.capture;
++    this.changed(owner);
++  }
++  observeResult(socket, metadata, method, result) {
++    const owner = this.sockets.get(socket);
++    if (!owner || owner.turnId !== metadata?.turn_id || !this.active(owner))
++      return;
++    if (method === "get_window_state")
++      for (const shot of result?.screenshots ?? [])
++        this.capture(owner, shot.url, {
++          screenshotId: shot.id,
++          width: shot.width,
++          height: shot.height,
++        });
++  }
++  capture(owner, url, metadata) {
++    if (
++      typeof url !== "string" ||
++      !/^data:image\/(png|jpeg|webp);base64,/.test(url)
++    )
++      return;
++    const normalized = this.normalizeImage(url);
++    if (
++      typeof normalized !== "string" ||
++      Buffer.byteLength(normalized) > CAPTURE_LIMIT
++    )
++      return;
++    owner.capture = {
++      ownerId: owner.id,
++      turnId: owner.turnId,
++      conversationId: owner.conversationId,
++      conversationKind: owner.conversationKind,
++      sequence: ++this.sequence,
++      ...metadata,
++      dataUrl: normalized,
++    };
++    // A single replaceable frame per owner; approval and lifecycle state use a
++    // separate reliable snapshot channel and are never displaced by images.
++    this.emit("capture", owner.capture);
++  }
++  observePresentation(origin, message) {
++    if (
++      ![
++        "computer-use-capture-updated",
++        "remote-hosted-pip-task-state-changed",
++        "remote-hosted-pip-content-layout-state-changed",
++        "remote-hosted-pip-browser-frame-state-changed",
++      ].includes(message?.type)
++    )
++      return;
++    const id =
++      message.threadId ??
++      message.threadID ??
++      message.state?.threadID ??
++      message.state?.activeThreadID;
++    // Composer capture updates often have no turn identity. Preserve the actual
++    // request identity as Desktop status, never as a guessed owner screenshot.
++    if (message.type === "computer-use-capture-updated") {
++      const status = {
++        requestId: String(message.requestId).slice(0, 128),
++        scope: id ? "conversation" : "desktop",
++        conversationId: id,
++        originId: origin?.id,
++        status: String(message.update?.type ?? "updated").slice(0, 64),
++        failureReason:
++          typeof message.update?.failureReason === "string"
++            ? message.update.failureReason.slice(0, 500)
++            : undefined,
++        sequence: ++this.sequence,
++      };
++      this.captureStatuses.set(status.requestId, status);
++      this.emit("captureStatus", status);
++    }
++    if (!id) return;
++    for (const owner of this.owners.values())
++      if (owner.conversationId === id && this.active(owner)) {
++        owner.presentations[message.type] = {
++          requestId: message.requestId,
++          state: message.state,
++          update: message.update,
++        };
++        this.changed(owner);
++      }
++  }
++}
++module.exports = { NativeHost };
+
+diff --git a/.vite/build/codex-web-native/receipts.cjs b/.vite/build/codex-web-native/receipts.cjs
+new file mode 100644
+--- /dev/null
++++ b/.vite/build/codex-web-native/receipts.cjs
+@@ -0,0 +1,109 @@
++const fs = require("node:fs");
++const path = require("node:path");
++const { randomUUID, createHash } = require("node:crypto");
++const { checkedId, nativeError } = require("./contract.cjs");
++function canonical(value) {
++  if (Array.isArray(value)) return value.map(canonical);
++  if (value && typeof value === "object")
++    return Object.fromEntries(
++      Object.keys(value)
++        .sort()
++        .map((k) => [k, canonical(value[k])]),
++    );
++  return value;
++}
++function fingerprint(value) {
++  return createHash("sha256")
++    .update(JSON.stringify(canonical(value)))
++    .digest("hex");
++}
++/** Durable Desktop-side receipts. No account credentials or upload URLs stored. */
++class NativeReceipts {
++  constructor(directory) {
++    this.directory = directory;
++    this.records = new Map();
++    this.running = new Map();
++    if (directory) {
++      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
++      for (const name of fs
++        .readdirSync(directory)
++        .filter((n) => /^[\w-]+\.json$/.test(n))) {
++        const row = JSON.parse(
++          fs.readFileSync(path.join(directory, name), "utf8"),
++        );
++        checkedId(row.id);
++        if (row.state === "dispatching") {
++          row.state = "unknown";
++          row.error =
++            "Desktop restarted before native acknowledgement; reconcile this operation";
++        }
++        this.put(row);
++      }
++    }
++  }
++  put(row) {
++    checkedId(row.id);
++    if (this.directory) {
++      const dest = path.join(this.directory, row.id + ".json"),
++        tmp = dest + "." + randomUUID() + ".tmp";
++      const fd = fs.openSync(tmp, "wx", 0o600);
++      try {
++        fs.writeFileSync(fd, JSON.stringify(row));
++        fs.fsyncSync(fd);
++      } finally {
++        fs.closeSync(fd);
++      }
++      fs.renameSync(tmp, dest);
++    }
++    this.records.set(row.id, row);
++    return row;
++  }
++  get(id) {
++    return this.records.get(checkedId(id));
++  }
++  async run(method, params, work) {
++    const id = checkedId(params.commandId),
++      digest = fingerprint({ method, params });
++    const prior = this.get(id);
++    if (prior) {
++      if (prior.fingerprint !== digest)
++        throw nativeError("Native command ID was reused for different input");
++      if (this.running.has(id)) return this.running.get(id);
++      if (prior.state === "complete") return prior.result;
++      throw nativeError(
++        prior.error ??
++          "Native operation outcome is unknown; reconcile before another command",
++        prior.state !== "failed",
++      );
++    }
++    this.put({
++      id,
++      method,
++      fingerprint: digest,
++      state: "dispatching",
++      conversationId: params.conversationId,
++      stageId: params.stageId,
++    });
++    const task = (async () => {
++      try {
++        const result = await work((partial) =>
++          this.put({ ...this.get(id), ...partial }),
++        );
++        this.put({ ...this.get(id), state: "complete", result });
++        return result;
++      } catch (error) {
++        this.put({
++          ...this.get(id),
++          state: error.deliveryUnknown === false ? "failed" : "unknown",
++          error: error.message,
++        });
++        throw nativeError(error.message, error.deliveryUnknown !== false);
++      } finally {
++        this.running.delete(id);
++      }
++    })();
++    this.running.set(id, task);
++    return task;
++  }
++}
++module.exports = { NativeReceipts, fingerprint };
+
+diff --git a/.vite/build/codex-web-native/contract.cjs b/.vite/build/codex-web-native/contract.cjs
+new file mode 100644
+--- /dev/null
++++ b/.vite/build/codex-web-native/contract.cjs
+@@ -0,0 +1,35 @@
++const BINDING_ID = "codex-web-native/26.908.40834/v1";
++const METHODS = new Set([
++  "native/photo/upload",
++  "native/message/send",
++  "native/operation/read",
++  "native/cu/attach",
++  "native/cu/sync",
++  "native/cu/answer",
++  "native/cu/stop",
++]);
++const MUTATIONS = new Set([
++  "native/photo/upload",
++  "native/message/send",
++  "native/cu/answer",
++  "native/cu/stop",
++]);
++const FRAME_LIMIT = 8 * 1024 * 1024;
++const CAPTURE_LIMIT = 1024 * 1024;
++function checkedId(value) {
++  if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value))
++    throw new Error("Invalid native identity");
++  return value;
++}
++function nativeError(message, deliveryUnknown = false) {
++  return Object.assign(new Error(message), { deliveryUnknown });
++}
++module.exports = {
++  BINDING_ID,
++  METHODS,
++  MUTATIONS,
++  FRAME_LIMIT,
++  CAPTURE_LIMIT,
++  checkedId,
++  nativeError,
++};
+
+diff --git a/.vite/build/codex-web-native/ipc.cjs b/.vite/build/codex-web-native/ipc.cjs
+new file mode 100644
+--- /dev/null
++++ b/.vite/build/codex-web-native/ipc.cjs
+@@ -0,0 +1,279 @@
++// Codex Desktop IPC wire protocol. Independently implemented from the installed
++// application's handlers; see docs/remote-desktop.md for reference provenance.
++const net = require("node:net");
++const { randomUUID } = require("node:crypto");
++const { EventEmitter } = require("node:events");
++
++class DesktopError extends Error {
++  constructor(code, message, unknown = false) {
++    super(message);
++    this.code = code;
++    this.deliveryUnknown = unknown;
++  }
++}
++
++function encodeFrame(message, limit = 64 * 1024 * 1024) {
++  const body = Buffer.from(JSON.stringify(message));
++  if (!body.length || body.length > limit)
++    throw new DesktopError(
++      "FRAME_LIMIT",
++      "Desktop message exceeds the bridge frame limit",
++    );
++  const frame = Buffer.allocUnsafe(4 + body.length);
++  frame.writeUInt32LE(body.length);
++  body.copy(frame, 4);
++  return frame;
++}
++
++class FrameReader {
++  constructor(receive, limit = 64 * 1024 * 1024) {
++    this.receive = receive;
++    this.limit = limit;
++    this.header = Buffer.alloc(4);
++    this.reset();
++  }
++  reset() {
++    this.headerUsed = 0;
++    this.body = null;
++    this.used = 0;
++  }
++  push(chunk) {
++    let offset = 0;
++    while (offset < chunk.length) {
++      if (!this.body) {
++        const count = Math.min(4 - this.headerUsed, chunk.length - offset);
++        chunk.copy(this.header, this.headerUsed, offset);
++        this.headerUsed += count;
++        offset += count;
++        if (this.headerUsed < 4) continue;
++        const length = this.header.readUInt32LE();
++        if (!length || length > this.limit)
++          throw new DesktopError("FRAME_LIMIT", "Invalid Desktop frame length");
++        this.body = Buffer.allocUnsafe(length);
++      }
++      const count = Math.min(
++        this.body.length - this.used,
++        chunk.length - offset,
++      );
++      chunk.copy(this.body, this.used, offset);
++      this.used += count;
++      offset += count;
++      if (this.used === this.body.length) {
++        const message = JSON.parse(this.body.toString("utf8"));
++        this.reset();
++        if (!message || typeof message !== "object" || Array.isArray(message))
++          throw new DesktopError("PROTOCOL", "Invalid Desktop envelope");
++        this.receive(message);
++      }
++    }
++  }
++}
++
++class DesktopIpc extends EventEmitter {
++  constructor({
++    endpoint = "\\\\.\\pipe\\codex-ipc",
++    versions,
++    timeoutMs = 15000,
++  }) {
++    super();
++    this.endpoint = endpoint;
++    this.versions = versions;
++    this.timeoutMs = timeoutMs;
++    this.pending = new Map();
++    this.clientId = null;
++    this.socket = null;
++    this.opening = null;
++  }
++  connect() {
++    if (this.clientId) return Promise.resolve();
++    if (this.opening) return this.opening;
++    this.opening = this.open().finally(() => {
++      this.opening = null;
++    });
++    return this.opening;
++  }
++  async open() {
++    const socket = net.createConnection(this.endpoint);
++    this.socket = socket;
++    const reader = new FrameReader((message) => this.receive(message));
++    socket.on("data", (chunk) => {
++      try {
++        reader.push(chunk);
++      } catch {
++        socket.destroy();
++      }
++    });
++    socket.on("error", () => {});
++    socket.on("close", () => {
++      if (this.socket !== socket) return;
++      this.socket = null;
++      this.clientId = null;
++      for (const p of this.pending.values()) {
++        clearTimeout(p.timer);
++        p.reject(
++          new DesktopError(
++            "IPC_DISCONNECTED",
++            "Desktop disconnected before acknowledgement; reconcile before submitting again",
++            true,
++          ),
++        );
++      }
++      this.pending.clear();
++      this.emit("disconnected");
++    });
++    try {
++      await new Promise((resolve, reject) => {
++        const timer = setTimeout(() => {
++          socket.destroy();
++          reject(
++            new DesktopError(
++              "IPC_TIMEOUT",
++              `Cannot connect to ${this.endpoint}; run the bridge as the same Windows user as Desktop`,
++            ),
++          );
++        }, this.timeoutMs);
++        socket.once("connect", () => {
++          clearTimeout(timer);
++          resolve();
++        });
++        socket.once("error", (error) => {
++          clearTimeout(timer);
++          reject(
++            new DesktopError(
++              error.code,
++              `Cannot attach to ${this.endpoint} (${error.code}); check that Desktop is running under this Windows user`,
++            ),
++          );
++        });
++      });
++      const reply = await this.request("initialize", {
++        clientType: "codex-web-desktop-bridge",
++      });
++      if (typeof reply.result?.clientId !== "string")
++        throw new DesktopError(
++          "INITIALIZE",
++          "Desktop returned no IPC client identity",
++        );
++      this.clientId = reply.result.clientId;
++      this.emit("connected");
++    } catch (error) {
++      socket.destroy();
++      throw error;
++    }
++  }
++  version(method) {
++    if (method === "initialize" || method === "client-status-changed")
++      return this.versions[method] ?? 0;
++    const version = this.versions[method];
++    if (!Number.isInteger(version))
++      throw new DesktopError(
++        "HANDLER_UNAVAILABLE",
++        `Installed Desktop has no IPC method version for ${method}`,
++      );
++    return version;
++  }
++  request(method, params, targetClientId) {
++    const requestId = randomUUID();
++    const message = {
++      type: "request",
++      requestId,
++      sourceClientId: this.clientId ?? "initializing-client",
++      version: this.version(method),
++      method,
++      params,
++      ...(targetClientId ? { targetClientId } : {}),
++    };
++    return new Promise((resolve, reject) => {
++      const timer = setTimeout(() => {
++        this.pending.delete(requestId);
++        reject(
++          new DesktopError(
++            "IPC_TIMEOUT",
++            `Desktop did not acknowledge ${method}; delivery is unknown`,
++            true,
++          ),
++        );
++      }, this.timeoutMs);
++      this.pending.set(requestId, { resolve, reject, timer });
++      try {
++        this.write(message);
++      } catch (error) {
++        clearTimeout(timer);
++        this.pending.delete(requestId);
++        reject(error);
++      }
++    });
++  }
++  broadcast(method, params, targetClientIds) {
++    this.write({
++      type: "broadcast",
++      method,
++      params,
++      sourceClientId: this.clientId,
++      version: this.version(method),
++      ...(targetClientIds ? { targetClientIds } : {}),
++    });
++  }
++  write(message) {
++    if (!this.socket?.writable || this.socket.writableLength > 8 * 1024 * 1024)
++      throw new DesktopError(
++        "IPC_UNAVAILABLE",
++        "Desktop pipe is unavailable",
++        true,
++      );
++    this.socket.write(encodeFrame(message));
++  }
++  receive(message) {
++    if (message.type === "client-discovery-request") {
++      // The bridge is never an owner or an execution runtime.
++      this.write({
++        type: "client-discovery-response",
++        requestId: message.requestId,
++        response: { canHandle: false },
++      });
++      return;
++    }
++    if (message.type === "request") {
++      this.write({
++        type: "response",
++        requestId: message.requestId,
++        resultType: "error",
++        error: "no-handler-for-request",
++      });
++      return;
++    }
++    if (message.type === "response") {
++      const p = this.pending.get(message.requestId);
++      if (!p) return;
++      clearTimeout(p.timer);
++      this.pending.delete(message.requestId);
++      if (message.resultType === "success") p.resolve(message);
++      else
++        p.reject(
++          new DesktopError(
++            "IPC_REJECTED",
++            `Desktop ${message.error ?? "rejected the request"}`,
++            !/^(no-client-found|no-handler-for-request|request-version-mismatch|not-initialized)$/.test(
++              message.error ?? "",
++            ),
++          ),
++        );
++      return;
++    }
++    if (
++      message.type === "broadcast" &&
++      (!message.targetClientIds ||
++        message.targetClientIds.includes(this.clientId))
++    ) {
++      if (message.version !== (this.versions[message.method] ?? 0)) {
++        this.emit("versionMismatch", message.method);
++        return;
++      }
++      this.emit("broadcast", message);
++    }
++  }
++  close() {
++    this.socket?.destroy();
++  }
++}
++module.exports = { DesktopError, DesktopIpc, FrameReader, encodeFrame };
+
+diff --git a/webview/assets/codex-web-native-renderer.mjs b/webview/assets/codex-web-native-renderer.mjs
+new file mode 100644
+--- /dev/null
++++ b/webview/assets/codex-web-native-renderer.mjs
+@@ -0,0 +1,102 @@
++// Loaded only by the reviewed, version-pinned patch inside the existing renderer.
++// All native function references are supplied by the lexical dispatch hook.
++export async function dispatchNativeRenderer(request, native) {
++  if (!request || typeof request !== "object")
++    throw new Error("Invalid native renderer request");
++  if (request.op === "binding/read")
++    return {
++      bindingId: "codex-web-native/26.908.40834/v1",
++      photoSubmission: ["target", "upload", "prepare", "submit"].every(
++        (k) => typeof native[k] === "function",
++      ),
++    };
++  const target = await native.target(request.conversationId);
++  if (!target || target.conversation_id !== request.conversationId)
++    throw Object.assign(new Error("Native ChatGPT target changed"), {
++      deliveryUnknown: false,
++    });
++  if (request.op === "photo/upload") {
++    const bytes = Uint8Array.from(atob(request.data), (c) => c.charCodeAt(0));
++    const file = new File([bytes], request.name, { type: request.mimeType });
++    const bitmap = await (native.decodeImage ?? createImageBitmap)(file);
++    const width = bitmap.width,
++      height = bitmap.height;
++    bitmap.close();
++    if (!width || !height || width * height > 32000000)
++      throw Object.assign(new Error("Native photo exceeds 32 megapixels"), {
++        deliveryUnknown: false,
++      });
++    const processed = await native.upload(file);
++    // uploadChatGptConversationFile returns the processed file/library identity.
++    // Jqr additionally needs dimensions to construct image_asset_pointer parts.
++    const attachment = {
++      id: processed.id,
++      libraryFileId: processed.libraryFileId,
++      name: processed.name,
++      mimeType: processed.mimeType,
++      size: processed.size,
++      width,
++      height,
++    };
++    return {
++      conversationId: target.conversation_id,
++      stageId: request.stageId,
++      attachment,
++    };
++  }
++  if (request.op === "message/prepare") {
++    const bundle = native.prepare({
++      prompt: request.prompt,
++      attachments: request.attachments,
++    });
++    const references = (bundle.message.content.parts ?? []).filter(
++      (part) => part?.content_type === "image_asset_pointer",
++    );
++    if (
++      references.length !== request.attachments.length ||
++      request.attachments.some(
++        (a) =>
++          !references.some(
++            (r) =>
++              r.asset_pointer ===
++                `${a.id.startsWith("file_") ? "sediment" : "file-service"}://${a.id}` &&
++              r.width === a.width &&
++              r.height === a.height,
++          ),
++      )
++    )
++      throw new Error(
++        "Native message builder did not retain the image references",
++      );
++    return {
++      conversationId: target.conversation_id,
++      parentMessageId: target.current_node,
++      bundle,
++      references,
++    };
++  }
++  if (request.op === "message/submit") {
++    if (target.current_node !== request.prepared.parentMessageId)
++      throw Object.assign(
++        new Error(
++          "Native conversation advanced after message preparation; reconcile before sending",
++        ),
++        { deliveryUnknown: false },
++      );
++    return native.submit(request);
++  }
++  if (request.op === "message/find") {
++    const found = Object.values(target.mapping ?? {}).find(
++      (node) => node.message?.id === request.messageId,
++    )?.message;
++    const parts = found?.content?.parts ?? [];
++    return {
++      found:
++        !!found &&
++        request.attachmentIds.every((id) =>
++          parts.some((p) => p?.asset_pointer?.endsWith("://" + id)),
++        ),
++    };
++  }
++  throw new Error("Native renderer operation is not exposed");
++}

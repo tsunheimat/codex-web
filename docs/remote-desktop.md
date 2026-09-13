@@ -1,5 +1,9 @@
 # Remote Desktop mode
 
+The unmodified-Desktop bridge is the default. The proposed patched adapter is an
+optional compatibility mode pending separate approval, not a mandatory dependency.
+See [the interface/official Remote evidence and review diff](native-adapter-review.md).
+
 The Windows bridge attaches to **already-running Codex Desktop** and opens an
 authenticated outbound WSS connection to the existing gateway. The existing web
 and mobile client use the gateway's authentication, sessions, command journal,
@@ -58,6 +62,9 @@ codex-web-desktop-bridge --gateway wss://gateway.example.com --backend windows-d
 
 Optional arguments: `--token-env NAME` selects a different private environment
 variable; `--state C:\absolute\bridge.sqlite` selects the durable command journal.
+`--native-adapter-config PATH` connects the separately approved in-process native
+binding. It is optional; the baseline bridge remains unchanged without it. See
+[the exact patch, installation and rollback procedure](native-adapter-installation.md).
 By default the journal lives at `%USERPROFILE%\.codex\codex-web-desktop\BACKEND.sqlite`.
 Keep it on the Windows host's local filesystem. Standard Node certificate trust
 applies; use `NODE_EXTRA_CA_CERTS` for a private gateway CA. Certificate validation
@@ -84,24 +91,26 @@ handler. The backend's capabilities and detected version appear in its summary.
 
 ## Implemented behavior and precise limits
 
-| Operation                                | Bridge behavior                                                                                                                                                                                                          |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Codex attachment/history                 | Owner discovery, targeted follower subscription, explicit history hydration, canonical `turnHistory` and live `tail:*` projection                                                                                        |
-| Codex prompt/steer/stop                  | Versioned `thread-follower-*` requests routed to the discovered Desktop owner, inheriting Desktop settings                                                                                                               |
-| Codex approvals                          | Command, file and question replies routed to Desktop; original request identity retained and completed requests reconciled                                                                                               |
-| Codex images                             | Upload through the gateway into the bridge's private Windows upload directory; only files staged by this bridge are accepted as image input                                                                              |
-| Native ChatGPT text                      | Existing native conversation discovery, reading and `send_message_to_thread` through Desktop app-tools; no app-server substitution                                                                                       |
-| Native ChatGPT history                   | Bounded recent history from `read_thread`, refreshed every three seconds for up to eight attached native chats; polling continues without viewers                                                                        |
-| Native ChatGPT attachments               | **Unavailable in this bridge.** The required renderer operation is `uploadChatGptConversationFile`, including `/files`, byte upload and `/files/process_upload_stream`. Neither local pipe exposes that operation        |
-| Native Computer Use control/presentation | **Unavailable in this bridge.** The missing binding is to Desktop's turn-owned helper/approval session and `computer-use-capture-updated` presentation stream. Codex's `turn/start` cannot substitute for these handlers |
+| Operation                                | Bridge behavior                                                                                                                                                                                                                          |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex attachment/history                 | Owner discovery, targeted follower subscription, explicit history hydration, canonical `turnHistory` and live `tail:*` projection                                                                                                        |
+| Codex prompt/steer/stop                  | Versioned `thread-follower-*` requests routed to the discovered Desktop owner, inheriting Desktop settings                                                                                                                               |
+| Codex approvals                          | Command, file and question replies routed to Desktop; original request identity retained and completed requests reconciled                                                                                                               |
+| Codex images                             | Upload through the gateway into the bridge's private Windows upload directory; only files staged by this bridge are accepted as image input                                                                                              |
+| Native ChatGPT text                      | Existing native conversation discovery, reading and `send_message_to_thread` through Desktop app-tools; no app-server substitution                                                                                                       |
+| Native ChatGPT history                   | Bounded recent history from `read_thread`, refreshed every three seconds for up to eight attached native chats; polling continues without viewers                                                                                        |
+| Native ChatGPT attachments               | Implemented through the version-pinned renderer adapter: processed native upload IDs and dimensions are consumed by `Iqr`/`Jqr` and submitted intact through `Rqr`. Disabled until the reviewed Desktop patch is approved and connected  |
+| Native Computer Use control/presentation | Implemented as observation of the original `ire`/`ore` owner, pending approval map, screenshot results and presentation dispatch. Explicit stop uses that owner's `Ge.closeActiveTurn`. Disabled until the approved binding is connected |
 
 The existing Desktop's native chat, uploads and Computer Use remain established
-working features. The last two rows describe missing **bridge interfaces**, not
-native feature failures. See [handler trace and provenance](desktop-protocol-reference.md).
+working features. The last two rows require the separately approved loading change;
+fixtures do not enable production capabilities. See [handler trace and provenance](desktop-protocol-reference.md).
 
 Image uploads are limited to 5 MiB each, a 100 MiB staging quota, and PNG/JPEG/GIF/WebP extensions. They are
 stored under `%USERPROFILE%\.codex\codex-web-desktop-uploads` and survive viewer
-and relay reconnects. A bridge process restart requires restaging unsent images.
+and relay reconnects. Native ChatGPT uploads additionally have durable staged-file,
+processed-attachment and prepared-message receipts, so completed native uploads
+survive bridge restarts. Legacy Codex-only image staging retains its prior behavior.
 File browsing, arbitrary host paths, terminal access, raw IPC, native helper calls,
 JavaScript evaluation and debugging endpoints are not exposed by this backend.
 
@@ -151,8 +160,10 @@ controls and mobile layout against a bridge fixture. Set
 `CODEX_WEB_BROWSER_EXECUTABLE` when using an installed Chromium-family browser.
 Both this test and the existing gateway browser lifecycle test passed on Windows.
 
-All eight new bridge tests, server/client type checks, frontend production build,
-and both browser suites passed. The initial unfiltered Windows gateway run exposed
-four pre-existing Unix-specific failures (`O_NOFOLLOW`, executable shell fixtures
-and Unix socket listen). The final portable gateway regression run passed with
-those four cases excluded; they are not reported as passed.
+The new native tests cover the frontend-to-native-adapter fixture path, upload and
+message acknowledgement loss, original Computer Use ownership/approval lifetimes,
+frame bounds, and installation-proof gates. Static patch preparation is verified
+against the installed package. Live execution of the new patch is awaiting approval;
+no established Desktop feature checks were repeated. The full gateway suite is run
+on Linux with no exclusions; Windows explicitly reports four POSIX-only tests as
+skipped, rather than passing them. See the installation guide for the validation split.
