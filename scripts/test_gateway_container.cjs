@@ -96,7 +96,7 @@ async function main() {
     assert.equal(backends.length, 1);
     assert.equal(backends[0].id, "windows-desktop");
     assert.equal(backends[0].connected, false);
-    const processes = (await docker(["top", name, "-eo", "args"])).stdout;
+    const processes = (await docker(["top", name, "-eo", "pid,args"])).stdout;
     assert.ok(processes.includes("src/server/gateway/main.js"));
     assert.ok(
       !processes.includes("codex app-server"),
