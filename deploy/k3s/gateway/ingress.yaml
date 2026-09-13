@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: codex-web-gateway
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - codex.example.com
+      secretName: codex-web-gateway-tls
+  rules:
+    - host: codex.example.com
+      http:
+        paths:
+          # One route serves the web client, API, viewer WS and Desktop WS.
+          # Traefik supports WebSocket upgrades without an extra middleware.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: codex-web-gateway
+                port:
+                  name: http

@@ -2,6 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const { EventEmitter } = require("node:events");
 const { createHash } = require("node:crypto");
 const { WebSocket } = require("ws");
 const { DatabaseSync } = require("node:sqlite");
@@ -148,7 +149,7 @@ function projectNative(id, result) {
     conversation: result,
   };
 }
-class DesktopBridge {
+class DesktopBridge extends EventEmitter {
   constructor({
     session,
     info,
@@ -160,7 +161,9 @@ class DesktopBridge {
     tlsCa,
     rediscover,
     nativeIntegration = null,
+    readOnly = false,
   }) {
+    super();
     Object.assign(this, {
       session,
       info,
@@ -172,6 +175,7 @@ class DesktopBridge {
       tlsCa,
       rediscover,
       nativeIntegration,
+      readOnly,
     });
     this.socket = null;
     this.stopped = false;
@@ -228,13 +232,13 @@ class DesktopBridge {
           ? {}
           : {
               chatgptAttachments:
-                "Awaiting approved in-process uploadChatGptConversationFile/Iqr/Rqr binding",
+                "This connector has no verified native ChatGPT upload route (uploadChatGptConversationFile).",
             }),
         ...(native.computerUse
           ? {}
           : {
               computerUse:
-                "Awaiting approved original-owner ire/ore/capture binding",
+                "This connector has no verified subscription to Desktop's Computer Use controls and presentation.",
             }),
       },
       ...native,
@@ -326,6 +330,7 @@ class DesktopBridge {
       }
       if (message.type === "desktop-ready") {
         this.ready = true;
+        this.emit("ready");
         this.nativeIntegration?.replay();
         for (const status of this.nativeIntegration?.captureStatuses() ?? [])
           this.send({ method: "desktop/capture/status", params: status });
@@ -372,6 +377,11 @@ class DesktopBridge {
       }
       this.inflight++;
       try {
+        if (this.readOnly && MUTATIONS.has(message.method))
+          throw new DesktopError(
+            "READ_ONLY",
+            "Connection check does not execute messages, uploads or approvals",
+          );
         const result = await this.journal.run(message, () =>
           this.dispatch(message.method, message.params ?? {}, message.id),
         );
@@ -391,15 +401,26 @@ class DesktopBridge {
         this.inflight--;
       }
     });
-    socket.on("error", () => {});
+    socket.on("error", (error) => {
+      // Never echo server-controlled text, URLs or authentication material.
+      this.emit(
+        "diagnostic",
+        "Gateway connection failed" +
+          (/^[A-Z_0-9]+$/.test(error.code ?? "") ? ` (${error.code})` : ""),
+      );
+    });
     socket.on("close", (code) => {
       clearInterval(heartbeat);
       if (this.socket !== socket) return;
       this.ready = false;
       this.socket = null;
       if (code === 1008) {
-        console.error(
-          "Desktop bridge authentication/configuration rejected; check the backend ID, protocol and agent token",
+        this.emit(
+          "fatal",
+          new DesktopError(
+            "GATEWAY_REJECTED",
+            "Gateway rejected the Desktop bridge; check backend ID, agent token and whether another bridge is connected",
+          ),
         );
         return;
       }
@@ -583,30 +604,59 @@ class DesktopBridge {
     if (!this.nativeIntegration)
       throw new DesktopError(
         "NATIVE_DISABLED",
-        "Native photos and Computer Use require the separately approved in-process adapter; see the prepared patch and rollback plan",
+        "This connector has no verified native photo/Computer Use route. The optional compatibility adapter is not connected.",
       );
     return this.nativeIntegration;
   }
   reconnectDesktop() {
-    if (this.localRetry || this.stopped) return;
+    if (this.localRetry || this.localReconnect || this.stopped) return;
     this.localRetry = setTimeout(async () => {
       this.localRetry = null;
+      this.localReconnect = this.restoreDesktop();
       try {
-        if (this.rediscover) await this.rediscover();
-        await this.session.ipc.connect();
-        for (const id of this.session.followed.keys())
-          await this.session.attach(id).catch(() => {});
-        this.send({
-          method: "desktop/connection",
-          params: { available: true, desktopVersion: this.info.version },
-        });
-      } catch (error) {
-        console.error(`Desktop reconnection: ${error.message}`);
-        this.reconnectDesktop();
+        await this.localReconnect;
+      } finally {
+        this.localReconnect = null;
+        if (!this.session.ipc.clientId) this.reconnectDesktop();
       }
     }, 3000);
   }
+  async restoreDesktop() {
+    try {
+      if (this.rediscover) await this.rediscover();
+      if (this.stopped) return;
+      await this.session.ipc.connect();
+      if (this.stopped) {
+        this.session.ipc.close();
+        return;
+      }
+      if (
+        this.session.nativeTools &&
+        !this.session.nativeTools.originThreadId
+      ) {
+        const rows = await this.session.list();
+        this.session.nativeTools.originThreadId = rows.data[0]?.id;
+      }
+      for (const id of this.session.followed.keys()) {
+        if (this.stopped) break;
+        await this.session.attach(id).catch(() => {});
+      }
+      if (this.stopped) return;
+      this.send({
+        method: "desktop/connection",
+        params: { available: true, desktopVersion: this.info.version },
+      });
+      this.send({
+        method: "desktop/capabilities",
+        params: this.capabilities(),
+      });
+    } catch (error) {
+      if (!this.stopped)
+        console.error(`Desktop reconnection: ${error.message}`);
+    }
+  }
   async close() {
+    if (this.stopped) return;
     this.stopped = true;
     clearTimeout(this.retry);
     clearTimeout(this.localRetry);
@@ -614,6 +664,7 @@ class DesktopBridge {
     this.socket?.close(1000);
     await this.nativeIntegration?.close();
     this.session.close();
+    await this.localReconnect;
     while (this.inflight || this.pollingNative)
       await new Promise((resolve) => setTimeout(resolve, 25));
     this.journal.close();
@@ -650,7 +701,11 @@ function optionalNativeIntegration({
 async function main() {
   const args = process.argv.slice(2),
     options = {};
-  for (let i = 0; i < args.length; i += 2) {
+  for (let i = 0; i < args.length; i++) {
+    if (["--check", "--wait-for-desktop"].includes(args[i])) {
+      options[args[i]] = true;
+      continue;
+    }
     if (
       ![
         "--gateway",
@@ -662,9 +717,9 @@ async function main() {
       !args[i + 1]
     )
       throw new Error(
-        "Usage: codex-web-desktop-bridge --gateway wss://gateway.example --backend windows-desktop [--token-env CODEX_WEB_DESKTOP_AGENT_TOKEN] [--state absolute.sqlite]",
+        "Usage: codex-web-desktop-bridge --gateway wss://gateway.example --backend windows-desktop [--token-env CODEX_WEB_DESKTOP_AGENT_TOKEN] [--state absolute.sqlite] [--check] [--wait-for-desktop]",
       );
-    options[args[i]] = args[i + 1];
+    options[args[i]] = args[++i];
   }
   const token =
     process.env[options["--token-env"] ?? "CODEX_WEB_DESKTOP_AGENT_TOKEN"];
@@ -674,9 +729,26 @@ async function main() {
     );
   validId(options["--backend"]);
   const url = gatewayUrl(options["--gateway"]);
-  const info = await discoverDesktop(),
-    ipc = new DesktopIpc(info);
-  await ipc.connect();
+  const {
+    waitForDesktop,
+    checkGateway,
+  } = require("./desktop/connection-lifecycle.cjs");
+  const abort = new AbortController();
+  const stopWaiting = () => abort.abort();
+  process.once("SIGINT", stopWaiting);
+  process.once("SIGTERM", stopWaiting);
+  let attached;
+  try {
+    attached = await waitForDesktop({
+      wait: options["--wait-for-desktop"] === true && !options["--check"],
+      signal: abort.signal,
+      diagnose: (message) => console.error(message),
+    });
+  } finally {
+    process.off("SIGINT", stopWaiting);
+    process.off("SIGTERM", stopWaiting);
+  }
+  const { info, ipc } = attached;
   let launched = false;
   try {
     const native = await discoverNativeTools();
@@ -689,18 +761,24 @@ async function main() {
           )
         : null,
     });
-    if (session.nativeTools && !session.nativeTools.originThreadId) {
+    if (
+      session.nativeTools &&
+      !session.nativeTools.originThreadId &&
+      !options["--check"]
+    ) {
       const rows = await session.list();
       if (rows.data[0]) session.nativeTools.originThreadId = rows.data[0].id;
     }
     const journal = new CommandJournal(
-      options["--state"] ??
-        path.join(
-          os.homedir(),
-          ".codex",
-          "codex-web-desktop",
-          options["--backend"] + ".sqlite",
-        ),
+      options["--check"]
+        ? ":memory:"
+        : (options["--state"] ??
+            path.join(
+              os.homedir(),
+              ".codex",
+              "codex-web-desktop",
+              options["--backend"] + ".sqlite",
+            )),
     );
     const bridge = new DesktopBridge({
       session,
@@ -709,8 +787,11 @@ async function main() {
       backendId: options["--backend"],
       token,
       journal,
+      readOnly: options["--check"] === true,
       nativeIntegration: optionalNativeIntegration({
-        filename: options["--native-adapter-config"],
+        filename: options["--check"]
+          ? undefined
+          : options["--native-adapter-config"],
         session,
         journal,
         contextThreadId:
@@ -724,17 +805,36 @@ async function main() {
         ipc.versions = next.versions;
         ipc.endpoint = next.endpoint;
         const tools = await discoverNativeTools();
+        const contextId = session.nativeTools?.originThreadId;
         session.nativeTools = tools
-          ? new NativeTools(tools.endpoint, session.nativeTools?.originThreadId)
+          ? new NativeTools(tools.endpoint, contextId)
           : null;
       },
     });
-    console.log(
+    console.error(
       `Attached to Codex Desktop ${info.version} (Windows package ${info.packageVersion ?? "unpackaged"}) at ${info.endpoint}`,
     );
     bridge.nativeIntegration?.client.on("diagnostic", (message) =>
       console.error(`Native adapter is disabled or unavailable: ${message}`),
     );
+    bridge.on("diagnostic", (message) => console.error(message));
+    if (options["--check"]) {
+      try {
+        const result = await checkGateway(bridge);
+        console.log(JSON.stringify(result, null, 2));
+      } finally {
+        await bridge.close();
+      }
+      return;
+    }
+    bridge.on("ready", () =>
+      console.error("Connected to gateway; Desktop owns execution."),
+    );
+    bridge.on("fatal", (error) => {
+      console.error(error.message);
+      process.exitCode = 1;
+      void bridge.close();
+    });
     bridge.start();
     launched = true;
     for (const signal of ["SIGINT", "SIGTERM"])

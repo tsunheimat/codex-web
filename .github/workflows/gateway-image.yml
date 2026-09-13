@@ -1,0 +1,142 @@
+name: gateway image
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts && npm rebuild node-pty --foreground-scripts
+      - name: Build gateway and client
+        run: npm run build:server && npm run build:gateway:web
+      - name: Test gateway and Desktop routing
+        run: node --test test/gateway-*.test.cjs
+      - name: Validate k3s configuration
+        run: |
+          kubectl kustomize deploy/k3s/gateway > "$RUNNER_TEMP/gateway-manifests.yaml"
+          node -e "const {parseConfig}=require('./src/server/gateway/config.js'); parseConfig(require('./deploy/k3s/gateway/gateway.config.json'), 'validation-only-token-with-at-least-32-characters');"
+
+  image:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Set up Node for container smoke test
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+      - name: Set image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}-gateway" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Build gateway image for verification
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: Dockerfile.gateway
+          platforms: linux/amd64
+          load: true
+          push: false
+          pull: true
+          tags: codex-web-gateway:ci
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=gateway-image
+          cache-to: type=gha,mode=max,scope=gateway-image
+      - name: Verify packaged gateway as non-root with read-only filesystem
+        run: node scripts/test_gateway_container.cjs codex-web-gateway:ci
+      - name: Log in to GHCR
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve gateway publish tags
+        id: publish
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+          sha_tag="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          echo "sha_tag=${sha_tag}" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$sha_tag" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          mutable_tag=""
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            mutable_tag="${IMAGE_NAME}:latest"
+          elif [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^v?[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            mutable_tag="${IMAGE_NAME}:${GITHUB_REF_NAME}"
+          fi
+          echo "mutable_tag=${mutable_tag}" >> "$GITHUB_OUTPUT"
+      - name: Publish verified gateway image
+        id: push
+        if: steps.publish.outputs.exists == 'false'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: Dockerfile.gateway
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.publish.outputs.sha_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=gateway-image
+      - name: Update release tag and report published image
+        if: steps.publish.outputs.sha_tag != ''
+        env:
+          SOURCE_TAG: ${{ steps.publish.outputs.sha_tag }}
+          MUTABLE_TAG: ${{ steps.publish.outputs.mutable_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$MUTABLE_TAG" ]]; then
+            docker buildx imagetools create --tag "$MUTABLE_TAG" "$SOURCE_TAG"
+          fi
+          docker buildx imagetools inspect "$SOURCE_TAG"
+          {
+            echo '### Gateway image published'
+            printf '\nImage: `%s`\n' "$SOURCE_TAG"
+            printf '\nSet `newTag` in `deploy/k3s/gateway/kustomization.yaml` to `sha-%s`.\n' "$GITHUB_SHA"
+            echo 'Apply the k3s manifests from your cluster admin machine. This workflow does not access the cluster.'
+          } >> "$GITHUB_STEP_SUMMARY"

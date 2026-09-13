@@ -16,6 +16,9 @@ ID at a different computer; add a new ID instead.
 
 ## Run the gateway
 
+For a k3s service that connects to the running Windows Desktop, use the
+[Desktop gateway k3s deployment](../deploy/k3s/gateway/README.md).
+
 Use Node 22.13 or later. The journal uses Node's built-in SQLite module, which may
 print an experimental warning on Node 22. Run one gateway process per database on
 a local persistent volume. Do not put its WAL database on an NFS share or run

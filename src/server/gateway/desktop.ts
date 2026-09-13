@@ -91,7 +91,12 @@ export class DesktopConnection extends EventEmitter {
             );
           else p.resolve(message.result);
         } else if (message.method === "desktop/capabilities") {
-          for (const key of ["chatgptAttachments", "computerUse"])
+          for (const key of [
+            "chatgpt",
+            "attachments",
+            "chatgptAttachments",
+            "computerUse",
+          ])
             this.info.capabilities[key] = message.params?.[key] === true;
           this.emit("capabilities");
         } else if (message.method === "desktop/connection") {

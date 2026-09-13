@@ -46,6 +46,10 @@ execution configuration.
 
 ## Launch on Windows
 
+For local installation, a protected bridge token, a read-only connection check and
+optional Windows sign-in startup, use the [Windows connector setup](windows-desktop-connector.md).
+The direct command below remains available.
+
 Use Node 22.13 or later and run under the same Windows account as Desktop.
 From this repository, after installing dependencies with `npm ci --ignore-scripts`:
 
@@ -62,6 +66,9 @@ codex-web-desktop-bridge --gateway wss://gateway.example.com --backend windows-d
 
 Optional arguments: `--token-env NAME` selects a different private environment
 variable; `--state C:\absolute\bridge.sqlite` selects the durable command journal.
+`--wait-for-desktop` waits for the user's Desktop to open instead of failing at
+startup. `--check` verifies Desktop and gateway authentication, rejects mutations,
+prints capabilities and exits; it never enables the optional adapter.
 `--native-adapter-config PATH` connects the separately approved in-process native
 binding. It is optional; the baseline bridge remains unchanged without it. See
 [the exact patch, installation and rollback procedure](native-adapter-installation.md).

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: codex-web-gateway-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # SQLite WAL must use node-local storage or a suitable block volume, not NFS.
+  # The local-path provisioner binds this storage to one node.
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi

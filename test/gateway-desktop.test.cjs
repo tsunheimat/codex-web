@@ -291,6 +291,77 @@ async function setup(t, nativeTools = null) {
   };
 }
 
+test("read-only Windows check rejects gateway mutations before journaling or dispatch", async (t) => {
+  const { bridge, service, fixture } = await setup(t);
+  bridge.readOnly = true;
+  const connection = service.connections.get("windows");
+  await assert.rejects(
+    connection.request(
+      "turn/start",
+      {
+        threadId: "owned-thread",
+        input: [{ type: "text", text: "Must never execute" }],
+      },
+      "check-mutation",
+    ),
+    /Connection check does not execute/,
+  );
+  await assert.rejects(
+    connection.request("attachment/upload", {
+      name: "photo.png",
+      data: "eA==",
+    }),
+    /Connection check does not execute/,
+  );
+  assert.equal(fixture.starts, 0);
+  assert.equal(
+    bridge.journal.db
+      .prepare("SELECT id FROM commands WHERE id=?")
+      .get("check-mutation"),
+    undefined,
+  );
+  const result = await connection.request("thread/read", {
+    threadId: "owned-thread",
+  });
+  assert.equal(result.thread.id, "owned-thread");
+});
+
+test("Desktop capabilities refresh after native pipe rediscovery", async (t) => {
+  const { bridge, service, session } = await setup(t);
+  session.nativeTools = { originThreadId: "owned-thread" };
+  bridge.send({
+    method: "desktop/capabilities",
+    params: bridge.capabilities(),
+  });
+  await until(
+    () => service.connections.get("windows").info.capabilities.chatgpt === true,
+  );
+  session.nativeTools = null;
+  bridge.send({
+    method: "desktop/capabilities",
+    params: bridge.capabilities(),
+  });
+  await until(
+    () =>
+      service.connections.get("windows").info.capabilities.chatgpt === false,
+  );
+});
+
+test("closing during Desktop rediscovery cannot reopen the local pipe", async (t) => {
+  const { bridge, ipc } = await setup(t);
+  let finishDiscovery;
+  const discovery = new Promise((resolve) => {
+    finishDiscovery = resolve;
+  });
+  bridge.rediscover = () => discovery;
+  bridge.localReconnect = bridge.restoreDesktop();
+  const closing = bridge.close();
+  finishDiscovery();
+  await closing;
+  await until(() => ipc.clientId === null);
+  assert.equal(ipc.clientId, null);
+});
+
 test("Desktop framing handles fragmented Unicode, coalesced frames, oversized and corrupt input", () => {
   const received = [],
     reader = new FrameReader((m) => received.push(m), 1024);
