@@ -80,13 +80,9 @@ async function main() {
       await delay(1000);
     }
     assert.ok(healthy, "Packaged gateway failed to become healthy");
-    const ui = await request("/");
-    assert.equal(ui.status, 200);
-    const html = await ui.text();
-    const asset = html.match(/src="([^"]+\.js)"/);
-    assert.ok(asset, "Built frontend script is absent");
-    const assetPath = new URL(asset[1], base + "/").pathname;
-    assert.equal((await request(assetPath)).status, 200);
+    // The gateway serves no page: the original renderer's compatibility
+    // server does, from its own image.
+    assert.equal((await request("/")).status, 404);
     assert.equal((await request("/api/v1/backends")).status, 401);
     const response = await request("/api/v1/backends", {
       headers: { authorization: `Bearer ${token}` },
