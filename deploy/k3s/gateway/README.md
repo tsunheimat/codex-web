@@ -23,7 +23,7 @@ Edit these files before applying:
 
 | File                  | Set                                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `kustomization.yaml`  | Set both `newTag` values to `sha-<full commit SHA>` from the successful gateway image and container image workflows           |
+| `kustomization.yaml`  | Set both `newTag` values to `sha-<full commit SHA>` from a successful `ci` workflow run on `main`                              |
 | `ingress.yaml`        | Set the HTTPRoute hostname and backend namespace for the cluster Gateway; attach your authentication policy to the `/` rule  |
 | `web-deployment.yaml` | `CODEX_WEB_ALLOWED_ORIGINS` to the exact HTTPS origin of the hostname                                                        |
 | `gateway.config.json` | The real Windows project path in `cwd`; `allowedOrigins` may stay as is because browsers never call the gateway directly      |
@@ -43,9 +43,9 @@ failover after loss of that node. Back up the data before removing its PVC.
 
 ## 2. Get the gateway image from CI
 
-The [gateway image workflow](../../../.github/workflows/gateway-image.yml) runs
-gateway tests, renders these manifests, builds `Dockerfile.gateway`, and smoke-tests
-the actual container with a read-only filesystem before publication. Pull requests
+The [ci workflow](../../../.github/workflows/ci.yml) runs the gateway tests and
+renders these manifests first; only then does it build `Dockerfile.gateway`, smoke-test
+the actual container with a read-only filesystem, and build the renderer image. Pull requests
 build and test without publishing. Pushes to `main` publish:
 
 ```text
@@ -58,12 +58,11 @@ tag only. The workflow can be run manually on `main`. Existing SHA tags are reus
 on reruns. Actions authenticates using its built-in `GITHUB_TOKEN` with package
 write permission; no Desktop token or cluster credential is used in the build.
 
-The renderer image `ghcr.io/tsunheimat/codex-web:sha-<full commit SHA>` comes
-from the [container image workflow](../../../.github/workflows/container-image.yml)
-for the same commit. It contains the prepared upstream renderer bundle and the
+The renderer image `ghcr.io/tsunheimat/codex-web:sha-<full commit SHA>` is
+published by the same workflow run for the same commit. It contains the prepared upstream renderer bundle and the
 compatibility server; in gateway mode it spawns no Codex runtime.
 
-Wait for **gateway image** to finish successfully, then copy its SHA tag from the
+Wait for **ci** to finish successfully, then copy the SHA tags from the
 job summary to `newTag` in `kustomization.yaml`. The example defaults to `latest`
 for initial setup; pin a SHA tag or digest for reproducible deployments. The
 workflow publishes `linux/amd64` images. ARM64 nodes need a separate matching
