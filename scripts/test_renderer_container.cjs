@@ -54,12 +54,10 @@ async function main() {
     );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "renderer-container-"));
   const suffix = randomBytes(6).toString("hex");
-  const network = `renderer-smoke-${suffix}`;
   const gatewayName = `gateway-smoke-${suffix}`;
   const rendererName = `renderer-smoke-${suffix}`;
   const viewerToken = randomBytes(32).toString("hex");
   const started = new Set();
-  let networkCreated = false;
   try {
     const config = JSON.parse(
       fs.readFileSync(
@@ -83,38 +81,11 @@ async function main() {
       `CODEX_WEB_GATEWAY_TOKEN=${viewerToken}\n`,
       { mode: 0o600 },
     );
-    await docker(["network", "create", network]);
-    networkCreated = true;
-
-    await docker([
-      "run",
-      "--detach",
-      "--name",
-      gatewayName,
-      "--network",
-      network,
-      "--read-only",
-      "--cap-drop=ALL",
-      "--security-opt=no-new-privileges",
-      "--tmpfs",
-      "/data:rw,uid=1000,gid=1000,mode=0700",
-      "--tmpfs",
-      "/tmp:rw,uid=1000,gid=1000,mode=0700",
-      "--env-file",
-      path.join(root, "gateway.env"),
-      "--mount",
-      `type=bind,src=${path.join(root, "gateway.json")},dst=/config/gateway.json,readonly`,
-      gatewayImage,
-    ]);
-    started.add(gatewayName);
-
     const rendererArgs = [
       "run",
       "--detach",
       "--name",
       rendererName,
-      "--network",
-      network,
       // web-deployment.yaml: runAsUser/runAsGroup 1000 and a read-only root.
       "--user",
       "1000:1000",
@@ -132,7 +103,11 @@ async function main() {
       "--env",
       "CODEX_WEB_RUNTIME_OWNERSHIP=external",
       "--env",
-      `CODEX_WEB_GATEWAY_URL=http://${gatewayName}:8215`,
+      // The packaged Desktop shell routes non-loopback app-server URLs
+      // through its fixed local SOCKS proxy. Share the renderer namespace so
+      // the gateway can be reached on loopback and the smoke test exercises
+      // the direct gateway path without requiring an unrelated proxy.
+      "CODEX_WEB_GATEWAY_URL=http://127.0.0.1:8215",
       "--env",
       "CODEX_WEB_GATEWAY_ALLOW_PLAIN_HTTP=true",
       "--env",
@@ -159,6 +134,28 @@ async function main() {
     );
     await docker(rendererArgs);
     started.add(rendererName);
+
+    await docker([
+      "run",
+      "--detach",
+      "--name",
+      gatewayName,
+      "--network",
+      `container:${rendererName}`,
+      "--read-only",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges",
+      "--tmpfs",
+      "/data:rw,uid=1000,gid=1000,mode=0700",
+      "--tmpfs",
+      "/tmp:rw,uid=1000,gid=1000,mode=0700",
+      "--env-file",
+      path.join(root, "gateway.env"),
+      "--mount",
+      `type=bind,src=${path.join(root, "gateway.json")},dst=/config/gateway.json,readonly`,
+      gatewayImage,
+    ]);
+    started.add(gatewayName);
 
     const { stdout } = await docker(["port", rendererName, "8214/tcp"]);
     const address = stdout.trim().split("\n")[0];
@@ -243,7 +240,6 @@ async function main() {
   } finally {
     for (const name of started)
       await docker(["rm", "--force", name]).catch(() => {});
-    if (networkCreated) await docker(["network", "rm", network]).catch(() => {});
     assert.equal(path.dirname(root), os.tmpdir());
     fs.rmSync(root, { recursive: true, force: true });
   }
