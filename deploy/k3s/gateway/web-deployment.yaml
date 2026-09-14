@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codex-web-desktop-ui
+  labels:
+    app.kubernetes.io/name: codex-web-desktop-ui
+spec:
+  # The compatibility server keeps per-page shell state in memory; run one.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codex-web-desktop-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codex-web-desktop-ui
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: desktop-ui
+          # The original Codex Desktop renderer and its Electron compatibility
+          # server (the repository's default Dockerfile), pointed at the gateway.
+          image: codex-web:desktop-ui
+          imagePullPolicy: Always
+          # The image's tini entrypoint stays; only the command is set.
+          args:
+            - node
+            - src/server/main.js
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8214"
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: HOME
+              value: /home/codex-web
+            - name: CODEX_HOME
+              value: /home/codex-web/.codex
+            # No local Codex runtime: every conversation lives on the Desktop.
+            - name: CODEX_WEB_RUNTIME_OWNERSHIP
+              value: external
+            - name: CODEX_WEB_GATEWAY_URL
+              value: http://codex-web-gateway:8215
+            # Cluster-internal plain HTTP between the two pods only.
+            - name: CODEX_WEB_GATEWAY_ALLOW_PLAIN_HTTP
+              value: "true"
+            - name: CODEX_WEB_GATEWAY_BACKEND
+              value: windows-desktop
+            - name: CODEX_WEB_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: codex-web-gateway-tokens
+                  key: CODEX_WEB_GATEWAY_TOKEN
+            # Browser uploads are staged here before they are copied to Desktop.
+            - name: CODEX_WEBUI_BROWSE_ROOT
+              value: /workspace
+            - name: CODEX_WEBUI_ALLOW_ANY_PROJECT
+              value: "false"
+            # Exact HTTPS origin of the page, matching the HTTPRoute hostname.
+            - name: CODEX_WEB_ALLOWED_ORIGINS
+              value: https://codex-test.test.tsunhei.com
+          ports:
+            - name: http
+              containerPort: 8214
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: home
+              mountPath: /home/codex-web
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Sidebar preferences and the shell's local state; nothing durable.
+        - name: home
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: workspace
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

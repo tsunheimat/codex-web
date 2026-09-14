@@ -5,10 +5,12 @@ optional compatibility mode pending separate approval, not a mandatory dependenc
 See [the interface/official Remote evidence and review diff](native-adapter-review.md).
 
 The Windows bridge attaches to **already-running Codex Desktop** and opens an
-authenticated outbound WSS connection to the existing gateway. The existing web
-and mobile client use the gateway's authentication, sessions, command journal,
-event synchronization and persisted history. Desktop retains account authentication
-and execution ownership on Windows.
+authenticated outbound WSS connection to the existing gateway. The original Desktop
+renderer, served by the compatibility server in gateway mode, uses the gateway's
+sessions, command journal, event synchronization and persisted history. Desktop
+retains account authentication and execution ownership on Windows; the bridge
+shares Desktop's signed-in identity with the renderer unless it is started with
+`--private-account`.
 
 Codex projections keep a recent history window within 6 MiB and clip individual
 display strings at 20,000 characters. The UI marks truncated history; full history
@@ -16,8 +18,7 @@ remains in Desktop. This keeps long conversations below the WSS message limit.
 
 ## Gateway registration
 
-Build the server and the independently deployable frontend as usual. Add a new
-backend ID to the gateway configuration (also shown in `gateway.example.json`):
+Build the server as usual. Add a new backend ID to the gateway configuration (also shown in `gateway.example.json`):
 
 ```json
 {
@@ -161,11 +162,11 @@ The installed-host check passed WSS gateway routing, a Desktop-owned conversatio
 with history, retained attachment during relay reconnect, and native ChatGPT
 history through the separate app-tools handler.
 
-After building the frontend, `npm run test:desktop:browser` checks the Desktop/native
-conversation picker, separate identities, native text routing, disabled unsupported
-controls and mobile layout against a bridge fixture. Set
+`npm run test:renderer:browser` opens the original renderer through the
+compatibility server in gateway mode against a bridge fixture: the Desktop
+thread under its project, seeded history with an image, a prompt from the
+original composer, the Desktop reply and the mobile viewport. Set
 `CODEX_WEB_BROWSER_EXECUTABLE` when using an installed Chromium-family browser.
-Both this test and the existing gateway browser lifecycle test passed on Windows.
 
 The new native tests cover the frontend-to-native-adapter fixture path, upload and
 message acknowledgement loss, original Computer Use ownership/approval lifetimes,

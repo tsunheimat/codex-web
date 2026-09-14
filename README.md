@@ -1,11 +1,15 @@
 # codex-web
 
 The remote upgrade adds a standalone session gateway, local/WebSocket/Unix/SSH
-connectors, durable reconnect and command tracking, and a responsive client with
-Capacitor mobile packaging. See [Remote gateway setup](docs/remote-gateway.md).
+connectors, durable reconnect and command tracking. The original Codex Desktop
+renderer stays the only web and mobile UI: in gateway mode its compatibility
+server points the renderer at a gateway backend instead of a local runtime. See
+[Remote gateway setup](docs/remote-gateway.md).
 The existing renderer/server workflow below remains available.
 [Remote Desktop mode](docs/remote-desktop.md) attaches an outbound Windows bridge
-to the running Desktop, with Codex follower control and native ChatGPT text/history.
+to the running Desktop, which keeps the account, conversations and execution;
+the renderer shows Desktop's projects and chats, sends prompts and images and
+answers approvals through the gateway.
 Native ChatGPT photo submission and Computer Use observation/approvals are
 implemented behind a [reviewed in-process adapter](docs/native-adapter-installation.md).
 This is an optional compatibility mode, disabled until separately approved and

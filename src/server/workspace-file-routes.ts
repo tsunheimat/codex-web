@@ -31,7 +31,13 @@ export function workspacePathFromAtFsUrl(rawUrl: string): string {
 export async function registerWorkspaceFileRoutes(
   app: FastifyInstance,
   authority: WorkspaceFileAuthority,
-  options: { cleanupOnClose?: boolean } = {},
+  options: {
+    cleanupOnClose?: boolean;
+    /** Serve images that live on a remote execution host (gateway mode). */
+    remoteImageReader?: (
+      filePath: string,
+    ) => Promise<{ contentType: string; bytes: Buffer } | null>;
+  } = {},
 ): Promise<void> {
   if (options.cleanupOnClose !== false) {
     app.addHook("onClose", async () => {
@@ -135,7 +141,24 @@ export async function registerWorkspaceFileRoutes(
     let openedStream: Readable | null = null;
     try {
       const requestedPath = workspacePathFromAtFsUrl(request.raw.url ?? "");
-      const file = await authority.openAllowedFile(requestedPath);
+      let file: Awaited<ReturnType<typeof authority.openAllowedFile>>;
+      try {
+        file = await authority.openAllowedFile(requestedPath);
+      } catch (error) {
+        // Not a local workspace file: in gateway mode the image may belong
+        // to a Desktop conversation, and the Desktop decides whether it is
+        // one the viewer may see.
+        const remote = options.remoteImageReader
+          ? await options.remoteImageReader(requestedPath).catch(() => null)
+          : null;
+        if (!remote) throw error;
+        return reply
+          .header("content-security-policy", "sandbox; default-src 'none'")
+          .header("x-content-type-options", "nosniff")
+          .header("cache-control", "private, max-age=300")
+          .type(remote.contentType)
+          .send(remote.bytes);
+      }
       openedStream = file.stream;
       const contentType = contentTypeForWorkspaceFile(file.downloadName);
       reply

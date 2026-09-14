@@ -895,6 +895,11 @@ const crashReporter = {
 };
 
 const net = {
+  // The Desktop shell consults network reachability before scheduling an
+  // app-server reconnect; a server process is treated as always online.
+  isOnline(): boolean {
+    return true;
+  },
   async fetch(input: string | URL, init?: RequestInit): Promise<Response> {
     // log("net.fetch", [input, init]);
     if (typeof globalThis.fetch === "function") {

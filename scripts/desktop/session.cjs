@@ -84,68 +84,137 @@ function orderedTurns(state) {
   for (const turn of state.turns ?? []) append(turn);
   return result;
 }
+const STRING_LIMIT = 20000;
+const IMAGE_DATA_URL_LIMIT = 1024 * 1024;
+// Fields the original Desktop renderer needs to display each item type.
+// Opaque runtime settings, credentials and hidden model context are never sent.
+const ITEM_FIELDS = {
+  agentMessage: ["text", "phase", "delivery"],
+  commandExecution: [
+    "command",
+    "cwd",
+    "status",
+    "aggregatedOutput",
+    "exitCode",
+    "durationMs",
+    "parsedCmd",
+    "commandActions",
+    "source",
+    "processId",
+  ],
+  fileChange: ["status", "changes"],
+  mcpToolCall: [
+    "server",
+    "tool",
+    "status",
+    "arguments",
+    "result",
+    "error",
+    "durationMs",
+    "invocation",
+  ],
+  imageGeneration: ["status", "revisedPrompt"],
+  webSearch: ["query", "action", "status"],
+  collabAgentToolCall: ["tool", "status", "prompt", "receiverThreadIds"],
+  plan: ["text", "status"],
+};
+function clipDeep(value, clip, depth = 0) {
+  if (typeof value === "string") return clip(value);
+  if (Array.isArray(value))
+    return depth > 6 ? [] : value.map((v) => clipDeep(v, clip, depth + 1));
+  if (value && typeof value === "object") {
+    if (depth > 6) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(value))
+      if (!BAD_KEYS.has(k)) out[k] = clipDeep(v, clip, depth + 1);
+    return out;
+  }
+  return value;
+}
+function projectContentPart(part, clip, onTruncate) {
+  if (!part || typeof part !== "object") return null;
+  if (part.type === "text")
+    return { type: "text", text: clip(part.text ?? ""), text_elements: [] };
+  if (part.type === "localImage" && typeof part.path === "string")
+    return { type: "localImage", path: part.path };
+  if (part.type === "image" && typeof part.url === "string") {
+    if (part.url.length <= IMAGE_DATA_URL_LIMIT)
+      return { type: "image", url: part.url };
+    onTruncate();
+    return null;
+  }
+  return null;
+}
+function projectItem(item, clip, onTruncate) {
+  if (!item || typeof item !== "object" || typeof item.type !== "string")
+    return null;
+  if (item.type === "userMessage")
+    return {
+      id: item.id,
+      type: item.type,
+      content: (item.content ?? [])
+        .map((part) => projectContentPart(part, clip, onTruncate))
+        .filter(Boolean),
+    };
+  const fields = ITEM_FIELDS[item.type];
+  if (!fields) return null;
+  const out = { id: item.id, type: item.type };
+  for (const field of fields)
+    if (item[field] !== undefined) out[field] = clipDeep(item[field], clip);
+  if (item.type === "agentMessage" && typeof out.text !== "string")
+    out.text = "";
+  return out;
+}
+/** Image paths referenced by user messages in the owner's state. */
+function referencedImagePaths(state) {
+  const paths = new Set();
+  for (const turn of orderedTurns(state)) {
+    for (const item of turn.items ?? [])
+      if (item?.type === "userMessage")
+        for (const part of item.content ?? [])
+          if (part?.type === "localImage" && typeof part.path === "string")
+            paths.add(part.path);
+    for (const part of turn.params?.input ?? [])
+      if (part?.type === "localImage" && typeof part.path === "string")
+        paths.add(part.path);
+  }
+  return paths;
+}
 function projectThread(id, state) {
   let historyTruncated = false;
+  const truncate = () => {
+    historyTruncated = true;
+  };
   const clip = (value) => {
     if (typeof value !== "string") return value;
-    if (value.length <= 20000) return value;
+    if (value.length <= STRING_LIMIT) return value;
     historyTruncated = true;
-    return value.slice(0, 20000) + "…";
+    return value.slice(0, STRING_LIMIT) + "…";
   };
   const turns = orderedTurns(state).map((turn) => {
     const turnId = turn.turnId ?? turn.id;
-    const items = (turn.items ?? []).flatMap((item) => {
-      if (
-        ![
-          "agentMessage",
-          "userMessage",
-          "commandExecution",
-          "fileChange",
-          "mcpToolCall",
-          "imageGeneration",
-          "webSearch",
-        ].includes(item.type)
-      )
-        return [];
-      // Do not send opaque runtime settings, credentials, or hidden model context.
-      if (item.type === "agentMessage")
-        return [{ id: item.id, type: item.type, text: clip(item.text ?? "") }];
-      if (item.type === "userMessage")
-        return [
-          {
-            id: item.id,
-            type: item.type,
-            content: (item.content ?? [])
-              .filter((v) => v.type === "text")
-              .map((v) => ({ type: "text", text: clip(v.text) })),
-          },
-        ];
-      return [
-        {
-          id: item.id,
-          type: item.type,
-          status: item.status,
-          ...(item.type === "commandExecution"
-            ? {
-                command: clip(item.command),
-                aggregatedOutput: clip(item.aggregatedOutput),
-              }
-            : {}),
-          ...(item.type === "mcpToolCall"
-            ? { server: item.server, tool: item.tool }
-            : {}),
-        },
-      ];
-    });
+    const items = (turn.items ?? [])
+      .map((item) => projectItem(item, clip, truncate))
+      .filter(Boolean);
     if (!items.some((i) => i.type === "userMessage") && turn.params?.input)
       items.unshift({
         id: "user-" + turnId,
         type: "userMessage",
         content: turn.params.input
-          .filter((i) => i.type === "text")
-          .map((i) => ({ type: "text", text: clip(i.text) })),
+          .map((part) => projectContentPart(part, clip, truncate))
+          .filter(Boolean),
       });
-    return { id: turnId, status: turn.status, items };
+    const projected = { id: turnId, status: turn.status, items };
+    if (turn.error && typeof turn.error === "object")
+      projected.error = {
+        message: clip(String(turn.error.message ?? "")),
+        ...(typeof turn.error.code === "string"
+          ? { code: turn.error.code }
+          : {}),
+      };
+    for (const field of ["startedAt", "completedAt", "durationMs"])
+      if (typeof turn[field] === "number") projected[field] = turn[field];
+    return projected;
   });
   const retained = [];
   let bytes = 0;
@@ -163,10 +232,22 @@ function projectThread(id, state) {
     bytes += length;
     retained.unshift(turn);
   }
+  const settings =
+    state.threadSettings ?? state.settings ?? state.conversationSettings ?? {};
   return {
     id,
     name: state.title ?? state.generatedTitle ?? "",
     cwd: state.cwd,
+    ...(typeof settings.model === "string" ? { model: settings.model } : {}),
+    ...(typeof settings.reasoningEffort === "string"
+      ? { reasoningEffort: settings.reasoningEffort }
+      : {}),
+    ...(typeof state.createdAt === "number"
+      ? { createdAt: state.createdAt }
+      : {}),
+    ...(typeof state.updatedAt === "number"
+      ? { updatedAt: state.updatedAt }
+      : {}),
     turns: retained,
     historyTruncated,
     historyComplete:
@@ -176,7 +257,37 @@ function projectThread(id, state) {
         false),
   };
 }
-
+const UPLOAD_NAME = /^[0-9a-f-]{36}\.(png|jpe?g|gif|webp)$/i;
+const IMAGE_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+};
+/** Global-state keys that decide where the original sidebar places a thread. */
+const GLOBAL_STATE_KEYS = [
+  "local-projects",
+  "projectless-thread-ids",
+  "thread-projectless-output-directories",
+  "project-order",
+  "pinned-project-ids",
+  "pinned-thread-ids",
+  "thread-project-assignments",
+  "thread-workspace-root-hints",
+];
+function decodeJwtClaims(token) {
+  try {
+    const payload = String(token).split(".")[1];
+    if (!payload) return null;
+    const claims = JSON.parse(
+      Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"),
+    );
+    return claims && typeof claims === "object" ? claims : null;
+  } catch {
+    return null;
+  }
+}
 class DesktopSession extends EventEmitter {
   constructor(
     ipc,
@@ -188,17 +299,23 @@ class DesktopSession extends EventEmitter {
         "codex-web-desktop-uploads",
       ),
       nativeTools = null,
+      uploadTtlMs = 7 * 24 * 60 * 60 * 1000,
+      shareAccountToken = true,
     } = {},
   ) {
     super();
     this.ipc = ipc;
     this.codexHome = codexHome;
     this.uploadRoot = uploadRoot;
+    this.uploadTtlMs = uploadTtlMs;
+    this.shareAccountToken = shareAccountToken;
     this.nativeTools = nativeTools;
     this.followed = new Map();
     this.chatgpt = new Map();
     this.recovering = new Map();
     this.uploads = new Map();
+    // Staged uploads survive bridge restarts: rebuild the registry from disk.
+    this.uploadsRestored = this.restoreUploads().catch(() => {});
     ipc.on("broadcast", (m) => this.onBroadcast(m));
     ipc.on("disconnected", () => {
       for (const entry of this.followed.values()) entry.owner = null;
@@ -352,6 +469,7 @@ class DesktopSession extends EventEmitter {
       this.resync(id);
       return;
     }
+    entry.resyncDelay = 0;
     if (change.type === "snapshot") this.emit("snapshot", id);
     this.emit("notification", {
       method: "desktop/snapshot",
@@ -392,8 +510,155 @@ class DesktopSession extends EventEmitter {
     entry.requests = pending;
   }
   resync(id) {
-    if (!this.recovering.has(id))
+    const entry = this.followed.get(id);
+    if (this.recovering.has(id) || !entry || entry.resyncTimer) return;
+    // A persistently inconsistent patch stream must not re-attach on every
+    // broadcast; back off up to 30 seconds between attempts.
+    const delay = entry.resyncDelay ? Math.min(entry.resyncDelay * 2, 30000) : 0;
+    entry.resyncDelay = Math.max(delay, 500);
+    entry.resyncTimer = setTimeout(() => {
+      entry.resyncTimer = null;
+      if (!this.followed.has(id) || this.recovering.has(id)) return;
       void this.attach(id).catch(() => this.emit("unavailable", id));
+    }, delay);
+    entry.resyncTimer.unref?.();
+  }
+  /** Account identity from Desktop's own credential store; no login flow. */
+  async account({ includeToken = false } = {}) {
+    let auth;
+    try {
+      auth = JSON.parse(
+        await fs.readFile(path.join(this.codexHome, "auth.json"), "utf8"),
+      );
+    } catch {
+      return { account: null, requiresOpenaiAuth: true };
+    }
+    if (!auth || typeof auth !== "object")
+      return { account: null, requiresOpenaiAuth: true };
+    if (auth.auth_mode === "apikey" || (!auth.tokens && auth.OPENAI_API_KEY))
+      return { account: { type: "apiKey" }, requiresOpenaiAuth: true };
+    const tokens = auth.tokens;
+    if (!tokens || typeof tokens !== "object")
+      return { account: null, requiresOpenaiAuth: true };
+    const claims =
+      decodeJwtClaims(tokens.id_token) ?? decodeJwtClaims(tokens.access_token) ?? {};
+    const profile = claims["https://api.openai.com/profile"] ?? {};
+    const authClaims = claims["https://api.openai.com/auth"] ?? {};
+    return {
+      account: {
+        type: "chatgpt",
+        email: typeof profile.email === "string" ? profile.email : null,
+        planType:
+          typeof authClaims.chatgpt_plan_type === "string"
+            ? authClaims.chatgpt_plan_type
+            : null,
+      },
+      requiresOpenaiAuth: true,
+      ...(includeToken && this.shareAccountToken
+        ? { authToken: tokens.access_token ?? null }
+        : {}),
+    };
+  }
+  /** Read an image staged by this bridge or shown in a followed conversation. */
+  async readFile({ path: target }) {
+    if (typeof target !== "string" || !path.isAbsolute(target))
+      throw new DesktopError("INVALID_INPUT", "Invalid file path");
+    await this.uploadsRestored;
+    const referenced =
+      this.uploads.has(target) ||
+      [...this.followed.values()].some(
+        (entry) => entry.state && referencedImagePaths(entry.state).has(target),
+      );
+    if (!referenced)
+      throw new DesktopError(
+        "FILE_ACCESS",
+        "Only images staged by this bridge or shown in a followed conversation can be read",
+      );
+    const contentType = IMAGE_TYPES[path.extname(target).toLowerCase()];
+    if (!contentType)
+      throw new DesktopError("INVALID_INPUT", "Only image files can be read");
+    const stat = await fs.lstat(target);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new DesktopError("FILE_ACCESS", "Not a regular file");
+    if (stat.size > 5 * 1024 * 1024)
+      throw new DesktopError("FILE_ACCESS", "Image exceeds 5 MiB");
+    const bytes = await fs.readFile(target);
+    return { dataBase64: bytes.toString("base64"), contentType, size: bytes.length };
+  }
+  /**
+   * Sidebar organisation the Windows Desktop keeps in its own global state:
+   * projects, projectless conversations and pin/order preferences. Only the
+   * keys the original renderer needs to place Desktop threads are shared.
+   */
+  async globalState() {
+    let state;
+    try {
+      state = JSON.parse(
+        await fs.readFile(
+          path.join(this.codexHome, ".codex-global-state.json"),
+          "utf8",
+        ),
+      );
+    } catch {
+      state = {};
+    }
+    const values = {};
+    if (state && typeof state === "object")
+      for (const key of GLOBAL_STATE_KEYS)
+        if (Object.hasOwn(state, key) && state[key] !== undefined)
+          values[key] = clipDeep(state[key], (text) =>
+            text.length > STRING_LIMIT ? text.slice(0, STRING_LIMIT) : text,
+          );
+    return { values };
+  }
+  /** Existence and kind of Desktop paths, for the renderer's project rows. */
+  async fileMetadata({ paths }) {
+    if (!Array.isArray(paths) || paths.length > 64)
+      throw new DesktopError("INVALID_INPUT", "paths must list at most 64 entries");
+    const entries = [];
+    for (const target of paths) {
+      if (typeof target !== "string" || !path.isAbsolute(target) || target.length > 4096)
+        throw new DesktopError("INVALID_INPUT", "Invalid file path");
+      try {
+        const stat = await fs.lstat(target);
+        entries.push({
+          path: target,
+          isDirectory: stat.isDirectory(),
+          isFile: stat.isFile(),
+          isSymlink: stat.isSymbolicLink(),
+          size: stat.size,
+          createdAtMs: Math.round(stat.birthtimeMs),
+          modifiedAtMs: Math.round(stat.mtimeMs),
+        });
+      } catch {
+        entries.push({ path: target, missing: true });
+      }
+    }
+    return { entries };
+  }
+  async restoreUploads() {
+    let names;
+    try {
+      names = await fs.readdir(this.uploadRoot);
+    } catch {
+      return;
+    }
+    const cutoff = Date.now() - this.uploadTtlMs;
+    for (const name of names) {
+      if (!UPLOAD_NAME.test(name)) continue;
+      const filename = path.join(this.uploadRoot, name);
+      try {
+        const stat = await fs.lstat(filename);
+        if (!stat.isFile()) continue;
+        if (stat.mtimeMs < cutoff) {
+          // Only files this bridge staged (UUID names) are ever removed.
+          await fs.unlink(filename);
+          this.uploads.delete(filename);
+          continue;
+        }
+        if (!this.uploads.has(filename)) this.uploads.set(filename, stat.mtimeMs);
+      } catch {}
+    }
   }
   async list() {
     let lines = [];
@@ -459,6 +724,7 @@ class DesktopSession extends EventEmitter {
         "OWNER_CHANGED",
         "Desktop ownership changed; reconcile before submitting",
       );
+    await this.uploadsRestored;
     let method, payload;
     if (action === "interrupt") {
       method = "thread-follower-interrupt-turn";
@@ -583,6 +849,7 @@ class DesktopSession extends EventEmitter {
     return work;
   }
   async storeUpload({ name, data }) {
+    await this.uploadsRestored;
     if (
       typeof name !== "string" ||
       name.length > 255 ||
@@ -607,6 +874,7 @@ class DesktopSession extends EventEmitter {
         "UPLOAD_ROOT",
         "The bridge upload directory must be a regular directory",
       );
+    await this.restoreUploads();
     const files = await fs.readdir(this.uploadRoot);
     const sizes = await Promise.all(
       files.map(
@@ -627,6 +895,8 @@ class DesktopSession extends EventEmitter {
     return { path: filename, name: path.basename(name), size: bytes.length };
   }
   close() {
+    for (const entry of this.followed.values())
+      if (entry.resyncTimer) clearTimeout(entry.resyncTimer);
     this.ipc.close();
   }
 }
@@ -637,4 +907,7 @@ module.exports = {
   applyPatches,
   projectThread,
   orderedTurns,
+  referencedImagePaths,
+  GLOBAL_STATE_KEYS,
+  decodeJwtClaims,
 };

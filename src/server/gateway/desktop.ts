@@ -23,6 +23,10 @@ const methods: Record<string, string> = {
   "computerUse/read": "desktop/computerUse/read",
   "computerUse/answer": "desktop/computerUse/answer",
   "computerUse/stop": "desktop/computerUse/stop",
+  "account/read": "desktop/account/read",
+  "file/read": "desktop/file/read",
+  "globalState/read": "desktop/globalState/read",
+  "fs/metadata": "desktop/fs/metadata",
 };
 
 /** A Desktop attachment, with no execution-runtime or process-launching code. */

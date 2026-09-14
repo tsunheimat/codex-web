@@ -46,6 +46,10 @@ const METHODS = new Set([
   "desktop/native/operation/read",
   "desktop/computerUse/attach",
   "desktop/computerUse/read",
+  "desktop/account/read",
+  "desktop/file/read",
+  "desktop/globalState/read",
+  "desktop/fs/metadata",
 ]);
 const NATIVE_GAPS = {
   chatgptAttachments:
@@ -346,6 +350,7 @@ class DesktopBridge extends EventEmitter {
               params: {
                 threadId,
                 thread: projectThread(threadId, entry.state),
+                revision: entry.revision,
               },
             });
             for (const request of entry.requests.values())
@@ -466,6 +471,14 @@ class DesktopBridge extends EventEmitter {
         return this.binding().control("stop", p, commandId);
       case "desktop/list":
         return this.session.list();
+      case "desktop/account/read":
+        return this.session.account({ includeToken: p.includeToken === true });
+      case "desktop/file/read":
+        return this.session.readFile(p);
+      case "desktop/globalState/read":
+        return this.session.globalState();
+      case "desktop/fs/metadata":
+        return this.session.fileMetadata(p);
       case "desktop/attach":
         return this.session.attach(validId(p.threadId));
       case "desktop/read":
@@ -637,11 +650,6 @@ class DesktopBridge extends EventEmitter {
         const rows = await this.session.list();
         this.session.nativeTools.originThreadId = rows.data[0]?.id;
       }
-      for (const id of this.session.followed.keys()) {
-        if (this.stopped) break;
-        await this.session.attach(id).catch(() => {});
-      }
-      if (this.stopped) return;
       this.send({
         method: "desktop/connection",
         params: { available: true, desktopVersion: this.info.version },
@@ -650,6 +658,16 @@ class DesktopBridge extends EventEmitter {
         method: "desktop/capabilities",
         params: this.capabilities(),
       });
+      // Re-attach followed conversations with bounded concurrency so one slow
+      // owner cannot delay the others; each re-attach publishes its snapshot.
+      const ids = [...this.session.followed.keys()];
+      const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+        while (ids.length && !this.stopped) {
+          const id = ids.shift();
+          await this.session.attach(id).catch(() => {});
+        }
+      });
+      await Promise.all(workers);
     } catch (error) {
       if (!this.stopped)
         console.error(`Desktop reconnection: ${error.message}`);
@@ -702,7 +720,11 @@ async function main() {
   const args = process.argv.slice(2),
     options = {};
   for (let i = 0; i < args.length; i++) {
-    if (["--check", "--wait-for-desktop"].includes(args[i])) {
+    if (
+      ["--check", "--wait-for-desktop", "--private-account"].includes(
+        args[i],
+      )
+    ) {
       options[args[i]] = true;
       continue;
     }
@@ -717,7 +739,7 @@ async function main() {
       !args[i + 1]
     )
       throw new Error(
-        "Usage: codex-web-desktop-bridge --gateway wss://gateway.example --backend windows-desktop [--token-env CODEX_WEB_DESKTOP_AGENT_TOKEN] [--state absolute.sqlite] [--check] [--wait-for-desktop]",
+        "Usage: codex-web-desktop-bridge --gateway wss://gateway.example --backend windows-desktop [--token-env CODEX_WEB_DESKTOP_AGENT_TOKEN] [--state absolute.sqlite] [--check] [--wait-for-desktop] [--private-account]",
       );
     options[args[i]] = args[++i];
   }
@@ -753,6 +775,9 @@ async function main() {
   try {
     const native = await discoverNativeTools();
     const session = new DesktopSession(ipc, {
+      // The original renderer signs in with the Desktop's own ChatGPT token.
+      // --private-account withholds it; the web UI then shows the sign-in gate.
+      shareAccountToken: options["--private-account"] !== true,
       nativeTools: native
         ? new NativeTools(
             native.endpoint,

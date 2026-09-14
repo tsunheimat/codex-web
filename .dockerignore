@@ -7,7 +7,6 @@
 !package.json
 !package-lock.json
 !vite.browser.config.ts
-!vite.gateway.config.ts
 !container-init.sh
 
 !assets/

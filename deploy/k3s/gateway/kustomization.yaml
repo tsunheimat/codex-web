@@ -5,6 +5,8 @@ resources:
   - namespace.yaml
   - deployment.yaml
   - service.yaml
+  - web-deployment.yaml
+  - web-service.yaml
   - storage.yaml
   - ingress.yaml
 configMapGenerator:
@@ -17,4 +19,9 @@ configMapGenerator:
 images:
   - name: codex-web-gateway
     newName: ghcr.io/tsunheimat/codex-web-gateway
-    newTag: latest
+    newTag: sha-163308592856d8a95a64e4b461f53c2bdb6499e0
+  # The original-renderer compatibility server image from the "container
+  # image" workflow (the repository's default Dockerfile). Pin the same commit.
+  - name: codex-web
+    newName: ghcr.io/tsunheimat/codex-web
+    newTag: sha-163308592856d8a95a64e4b461f53c2bdb6499e0

@@ -51,6 +51,14 @@ export class SessionService extends EventEmitter {
   private queued = new Map<string, Promise<void>>();
   readonly captures = new Map<string, any>();
   readonly captureStatuses = new Map<string, any>();
+  /**
+   * Renderer clients attached through the app-server endpoint answer runtime
+   * server requests themselves; a handler returning true owns the request.
+   */
+  readonly requestHandlers = new Map<
+    string,
+    Set<(message: any, epoch: string) => boolean>
+  >();
   constructor(
     readonly store: SessionStore,
     readonly backends: Backend[],
@@ -561,6 +569,10 @@ export class SessionService extends EventEmitter {
     );
   }
 
+  /** Attach (or re-attach) a stored session to its runtime conversation. */
+  attachSession(id: string): Promise<void> {
+    return this.attach(id);
+  }
   private async attach(id: string): Promise<void> {
     const session = this.store.get(id);
     if (!session.threadId && !session.conversationId) return;
@@ -696,6 +708,43 @@ export class SessionService extends EventEmitter {
       .request(kind === "chatgpt" ? "chatgpt/list" : "thread/list", {
         limit: 30,
       });
+  }
+  /** Account identity held by the Windows Desktop's own credential store. */
+  async desktopAccount(id: string, includeToken = false): Promise<any> {
+    const connection = this.connections.get(id);
+    if (!(connection instanceof DesktopConnection))
+      throw conflict("Backend is not a Desktop transport");
+    return connection.request("account/read", { includeToken });
+  }
+  /** Read an image the bridge staged or that a followed conversation shows. */
+  async desktopReadFile(id: string, filePath: string): Promise<any> {
+    const connection = this.connections.get(id);
+    if (!(connection instanceof DesktopConnection))
+      throw conflict("Backend is not a Desktop transport");
+    if (typeof filePath !== "string" || filePath.length > 4096)
+      throw Object.assign(new Error("Invalid path"), { statusCode: 400 });
+    return connection.request("file/read", { path: filePath });
+  }
+
+  /** Projects and projectless-thread bookkeeping the Windows Desktop stores. */
+  async desktopGlobalState(id: string): Promise<any> {
+    const connection = this.connections.get(id);
+    if (!(connection instanceof DesktopConnection))
+      throw conflict("Backend is not a Desktop transport");
+    return connection.request("globalState/read", {});
+  }
+  /** Existence and kind of paths on the Desktop host (no contents). */
+  async desktopFileMetadata(id: string, paths: string[]): Promise<any> {
+    const connection = this.connections.get(id);
+    if (!(connection instanceof DesktopConnection))
+      throw conflict("Backend is not a Desktop transport");
+    if (
+      !Array.isArray(paths) ||
+      paths.length > 64 ||
+      paths.some((p) => typeof p !== "string" || p.length > 4096)
+    )
+      throw Object.assign(new Error("Invalid paths"), { statusCode: 400 });
+    return connection.request("fs/metadata", { paths });
   }
 
   desktopToken(id: string): string | null {
@@ -971,6 +1020,8 @@ export class SessionService extends EventEmitter {
 
   private onRequest(backendId: string, message: any, epoch: string): void {
     if (this.stopped) return;
+    for (const handler of this.requestHandlers.get(backendId) ?? [])
+      if (handler(message, epoch)) return;
     const connection = this.connections.get(backendId)!;
     const session = this.store.findThread(backendId, message.params?.threadId);
     if (

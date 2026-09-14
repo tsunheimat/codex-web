@@ -35,7 +35,7 @@ spec:
         - name: gateway
           # Replaced by the images entry in kustomization.yaml.
           image: codex-web-gateway:desktop
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - /config/gateway.json
           env:

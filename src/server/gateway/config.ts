@@ -38,7 +38,6 @@ export type GatewayConfig = {
   token: string;
   allowedOrigins: string[];
   backends: Backend[];
-  webRoot?: string;
 };
 
 export function shellQuote(value: string): string {
@@ -244,9 +243,8 @@ export function parseConfig(input: unknown, token: string): GatewayConfig {
       (o) =>
         typeof o !== "string" ||
         !(
-          o === "capacitor://localhost" ||
-          (new URL(o).origin === o &&
-            ["http:", "https:"].includes(new URL(o).protocol))
+          new URL(o).origin === o &&
+          ["http:", "https:"].includes(new URL(o).protocol)
         ),
     )
   )
@@ -258,7 +256,6 @@ export function parseConfig(input: unknown, token: string): GatewayConfig {
     token,
     allowedOrigins: origins,
     backends,
-    ...(value.webRoot ? { webRoot: absolute(value.webRoot, "webRoot") } : {}),
   };
 }
 

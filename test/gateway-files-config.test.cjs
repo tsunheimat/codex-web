@@ -57,7 +57,7 @@ test("configuration requires credentials, TLS, stable identities and pinned SSH 
         type: "ssh",
         ssh: { host: "user@dev", knownHostsFile: "/keys/known_hosts" },
       }),
-      allowedOrigins: ["capacitor://localhost", "https://localhost"],
+      allowedOrigins: ["https://codex-ui.example.com", "https://localhost"],
     },
     token,
   );

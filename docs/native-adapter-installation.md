@@ -183,7 +183,7 @@ request's session and turn metadata.
   Windows marks its four genuine POSIX helper/SSH/Unix-socket cases skipped with
   reasons; those exclusions are not counted as passed.
 
-Useful commands: `npm run test:desktop`, `npm run test:desktop:native:browser`, and
+Useful commands: `npm run test:desktop`, `npm run test:renderer:browser`, and
 `npm run test:gateway` on Linux. Build the frontend before the browser test. Use
 `CODEX_WEB_BROWSER_EXECUTABLE` for an installed Chromium browser when necessary.
 
