@@ -81,7 +81,8 @@ async function main() {
     }
     assert.ok(healthy, "Packaged gateway failed to become healthy");
     // The gateway serves no page: the original renderer's compatibility
-    // server does, from its own image.
+    // server does, from its own image (scripts/test_renderer_container.cjs
+    // verifies that path). The HTTPRoute must therefore not send / here.
     assert.equal((await request("/")).status, 404);
     assert.equal((await request("/api/v1/backends")).status, 401);
     const response = await request("/api/v1/backends", {
@@ -99,7 +100,7 @@ async function main() {
       "Gateway must not spawn an execution runtime",
     );
     console.log(
-      "Container passed: health, frontend assets, API authentication, Desktop backend, read-only non-root startup.",
+      "Container passed: health, no page at / (renderer image serves it), API authentication, Desktop backend, read-only non-root startup.",
     );
   } catch (error) {
     if (started) {

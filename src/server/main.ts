@@ -683,6 +683,12 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     return reply.sendFile("index.html");
   });
 
+  // HTTP probe target for the container platform (the page fallback below
+  // would otherwise answer with index.html). The Desktop shell's startup runs
+  // after the socket listens and exits the process when it fails, so a
+  // listening server is the liveness signal; nothing here waits on the shell.
+  app.get("/healthz", async () => ({ ok: true }));
+
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith("/@fs/")) {
       return reply.code(404).send({ error: "Not Found" });

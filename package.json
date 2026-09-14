@@ -56,6 +56,7 @@
     "desktop:native:prepare": "node scripts/prepare_desktop_native_adapter.cjs --prepare scratch/native-adapter-plan",
     "desktop:native:review": "node scripts/export_desktop_native_review.cjs",
     "test:gateway": "npm run build:server && node --test test/gateway-*.test.cjs",
+    "test:renderer": "npm run build:server && node --test test/renderer-gateway-startup.test.cjs",
     "test:renderer:browser": "npm run build:server && npm run build:browser && node scripts/test_renderer_desktop_browser.cjs"
   },
   "repository": "git@github.com:0xcaff/codex-web.git",

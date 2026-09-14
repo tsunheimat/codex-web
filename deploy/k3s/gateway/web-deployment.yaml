@@ -27,6 +27,52 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        # The Desktop shell's startup opens its app-server WebSocket through
+        # the gateway and the compatibility server exits when that connection
+        # is refused. Wait for the gateway Service before starting the shell
+        # so a gateway rollout does not leave the renderer crash-looping.
+        - name: wait-for-gateway
+          # Keep this image name identical to the main container so the
+          # Kustomize image replacement updates both references.
+          image: codex-web:desktop-ui
+          imagePullPolicy: Always
+          command:
+            - node
+            - -e
+            - |
+              const url = process.env.CODEX_WEB_GATEWAY_URL + "/healthz";
+              const deadline = Date.now() + 5 * 60 * 1000;
+              (async () => {
+                while (Date.now() < deadline) {
+                  try {
+                    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+                    if (response.ok) return;
+                    console.log(`gateway not ready: ${response.status}`);
+                  } catch (error) {
+                    console.log(`gateway not reachable: ${error.message}`);
+                  }
+                  await new Promise((resolve) => setTimeout(resolve, 3000));
+                }
+                console.error("gateway did not become healthy");
+                process.exit(1);
+              })();
+          env:
+            - name: CODEX_WEB_GATEWAY_URL
+              value: http://codex-web-gateway:8215
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
       containers:
         - name: desktop-ui
           # The original Codex Desktop renderer and its Electron compatibility
@@ -74,19 +120,27 @@ spec:
           ports:
             - name: http
               containerPort: 8214
+          # The shell exits the process when its startup fails (unwritable
+          # Codex home, refused gateway connection), so the probes watch the
+          # compatibility server's /healthz rather than a client-routed path.
           startupProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
             periodSeconds: 5
             failureThreshold: 36
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
             periodSeconds: 10
+            timeoutSeconds: 2
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: http
             periodSeconds: 20
+            timeoutSeconds: 2
             failureThreshold: 3
           resources:
             requests:
@@ -104,6 +158,12 @@ spec:
           volumeMounts:
             - name: home
               mountPath: /home/codex-web
+            # The image declares /home/codex-web/.codex as a VOLUME. Without an
+            # explicit mount, containerd copies the image's root-owned directory
+            # into an anonymous volume there and the shell (UID 1000) exits with
+            # EACCES creating .codex/sqlite. Mount a writable volume instead.
+            - name: codex-home
+              mountPath: /home/codex-web/.codex
             - name: workspace
               mountPath: /workspace
             - name: tmp
@@ -111,6 +171,9 @@ spec:
       volumes:
         # Sidebar preferences and the shell's local state; nothing durable.
         - name: home
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: codex-home
           emptyDir:
             sizeLimit: 256Mi
         - name: workspace
