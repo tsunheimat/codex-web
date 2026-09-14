@@ -43,10 +43,16 @@ failover after loss of that node. Back up the data before removing its PVC.
 
 ## 2. Get the gateway image from CI
 
-The [ci workflow](../../../.github/workflows/ci.yml) runs the gateway tests and
-renders these manifests first; only then does it build `Dockerfile.gateway`, smoke-test
-the actual container with a read-only filesystem, and build the renderer image. Pull requests
-build and test without publishing. Pushes to `main` publish:
+The [ci workflow](../../../.github/workflows/ci.yml) runs the gateway tests,
+the manifest contract tests (`test/gateway-deployment.test.cjs`) and renders
+these manifests first; only then does it build `Dockerfile.gateway` and
+smoke-test the actual container with a read-only filesystem
+(`scripts/test_gateway_container.cjs`), and build the renderer image and run it
+next to that gateway image as UID 1000 on a read-only root with emptyDir-style
+volumes, asserting that `GET /` serves the Desktop UI
+(`scripts/test_renderer_container.cjs`). A green gateway `/healthz` alone never
+publishes a renderer that cannot serve the page. Pull requests build and test
+without publishing. Pushes to `main` publish:
 
 ```text
 ghcr.io/tsunheimat/codex-web-gateway:sha-<full commit SHA>
@@ -62,10 +68,10 @@ The renderer image `ghcr.io/tsunheimat/codex-web:sha-<full commit SHA>` is
 published by the same workflow run for the same commit. It contains the prepared upstream renderer bundle and the
 compatibility server; in gateway mode it spawns no Codex runtime.
 
-Wait for **ci** to finish successfully, then copy the SHA tags from the
-job summary to `newTag` in `kustomization.yaml`. The example defaults to `latest`
-for initial setup; pin a SHA tag or digest for reproducible deployments. The
-workflow publishes `linux/amd64` images. ARM64 nodes need a separate matching
+Wait for **ci** to finish successfully, then copy the SHA tag from the job
+summary to both `newTag` values in `kustomization.yaml`; the contract test
+rejects two different commits. Pin a SHA tag or digest for reproducible
+deployments. The workflow publishes `linux/amd64` images. ARM64 nodes need a separate matching
 build. If the new GHCR package is private, configure an image-pull Secret as
 described below or set its package visibility to public in GitHub.
 
@@ -167,6 +173,26 @@ The health response is `{"ok":true}`. The
 gateway can be healthy while Windows is offline; health probes deliberately check
 the service, not whether a Desktop is currently attached.
 
+The renderer Deployment runs the shell as UID 1000 on a read-only root
+filesystem with emptyDir volumes at `/home/codex-web`, `/home/codex-web/.codex`,
+`/workspace` and `/tmp`. The `.codex` mount is required: the image declares that
+path as a `VOLUME`, and without an explicit mount containerd substitutes a
+root-owned anonymous directory, after which the shell exits with `EACCES`
+creating `.codex/sqlite` and the page answers 503. The shell also exits when the
+gateway refuses its app-server WebSocket at startup, so a `wait-for-gateway`
+init container polls the gateway Service first. Both containers answer
+`/healthz` for their probes; the public `/healthz` is the gateway's.
+
+Verify the page itself, not only the gateway:
+
+```bash
+curl --fail -o /dev/null -w '%{http_code} %{content_type}\n' https://codex-test.test.tsunhei.com/
+```
+
+Expect `200 text/html; charset=utf-8`. A 404 `Route GET:/ not found` means the
+route sends `/` to the gateway; a 503 means the renderer Deployment has no ready
+pod (`kubectl -n codex-web-gateway logs deployment/codex-web-desktop-ui`).
+
 Open the same HTTPS address in your browser: the original Codex Desktop UI
 loads, signed in as the Desktop's ChatGPT account once the connector is running
 (no token prompt; the renderer's server holds the viewer token). Configure the
@@ -198,6 +224,7 @@ too if its agent token was rotated.
 
 ```bash
 kubectl -n codex-web-gateway logs deployment/codex-web-gateway --tail=100
+kubectl -n codex-web-gateway logs deployment/codex-web-desktop-ui --all-containers --tail=100
 kubectl -n codex-web-gateway describe pods
 kubectl -n codex-web-gateway describe pvc codex-web-gateway-data
 ```
@@ -208,6 +235,10 @@ kubectl -n codex-web-gateway describe pvc codex-web-gateway-data
 | CreateContainerConfigError          | Both required keys exist in `codex-web-gateway-tokens`                            |
 | PVC Pending                         | Storage class/provisioner and eligible node availability                          |
 | Database permission error           | Data volume is writable by UID/GID 1000                                           |
+| Renderer exits `EACCES ... .codex/sqlite` | `codex-home` emptyDir is mounted at `/home/codex-web/.codex` (see above)   |
+| Renderer exits `ECONNREFUSED`       | Gateway Service unreachable at shell startup; the init container should wait     |
+| Page returns 404 `Route GET:/ not found` | HTTPRoute `/` rule points at the gateway instead of `codex-web-desktop-ui` |
+| Page returns 503                    | No ready renderer pod; check its startup/readiness probe and logs                 |
 | Browser API returns 403             | HTTPS frontend origin matches `allowedOrigins` exactly                            |
 | Windows reports certificate failure | Certificate hostname and chain; configure its private CA on Windows if applicable |
 | Windows handshake rejected          | Backend ID and agent token match; only one bridge occupies that ID                |

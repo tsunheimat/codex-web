@@ -63,7 +63,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
-    && mkdir -p /app /workspace /home/codex-web "${CODEX_HOME}"
+    && mkdir -p /app /workspace /home/codex-web "${CODEX_HOME}" \
+    # Deployments run this image as UID 1000 (the base image's "node" user)
+    # with a read-only root filesystem. Runtimes that honour the VOLUME
+    # declaration below (containerd copies the image directory into an
+    # anonymous volume) must not hand that user a root-owned Codex home.
+    && chown -R node:node /workspace /home/codex-web
 
 WORKDIR /app
 

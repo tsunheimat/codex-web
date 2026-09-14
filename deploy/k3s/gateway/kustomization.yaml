@@ -13,15 +13,16 @@ configMapGenerator:
   - name: codex-web-gateway-config
     files:
       - gateway.json=gateway.config.json
-# The "ci" workflow publishes both images. Pin newTag to sha-<commit> from
-# a successful run on main before deploying a release.
+# The "ci" workflow publishes both images from the same commit. Pin both
+# newTag values to sha-<commit> from a successful run on main before deploying
+# a release; test/gateway-deployment.test.cjs rejects mismatched pins.
 # Keep the generated ConfigMap hash: configuration edits trigger a rollout.
 images:
   - name: codex-web-gateway
     newName: ghcr.io/tsunheimat/codex-web-gateway
-    newTag: sha-163308592856d8a95a64e4b461f53c2bdb6499e0
-  # The original-renderer compatibility server image from the "container
-  # image" workflow (the repository's default Dockerfile). Pin the same commit.
+    newTag: sha-3cdef8e3556e517f8524c3031065da11781e770e
+  # The original-renderer compatibility server image (the repository's default
+  # Dockerfile), published by the same workflow run. Pin the same commit.
   - name: codex-web
     newName: ghcr.io/tsunheimat/codex-web
-    newTag: sha-163308592856d8a95a64e4b461f53c2bdb6499e0
+    newTag: sha-3cdef8e3556e517f8524c3031065da11781e770e

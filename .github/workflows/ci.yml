@@ -55,6 +55,7 @@ jobs:
             test/authoritative-thread-reader.test.cjs \
             test/cache-policy.test.cjs \
             test/codex-web-evidence-client.test.cjs \
+            test/deployment-contract.test.cjs \
             test/electron-app-lifecycle.test.cjs \
             test/ipc-renderer-invoke.test.cjs \
             test/path-sanitizer.test.cjs \
@@ -88,20 +89,47 @@ jobs:
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Node for container smoke test
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
-      - name: Build image without publishing
-        if: env.PUBLISH != 'true'
+      - name: Build renderer image for verification
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           platforms: linux/amd64
+          load: true
           push: false
           pull: true
           build-args: |
             CODEX_VERSION=0.145.0
-          tags: ${{ steps.image.outputs.name }}:ci
+          tags: codex-web:ci
+          cache-from: type=gha,scope=renderer-image
+          cache-to: type=gha,mode=max,scope=renderer-image
+
+      # The renderer is only usable next to the gateway it dials at startup;
+      # the gateway job builds and caches this same image.
+      - name: Build gateway image for the renderer smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: Dockerfile.gateway
+          platforms: linux/amd64
+          load: true
+          push: false
+          pull: true
+          tags: codex-web-gateway:ci
+          cache-from: type=gha,scope=gateway-image
+
+      # The deployed browser path: UID 1000, read-only root, emptyDir-style
+      # volumes, the shell completes startup through the gateway, GET / serves
+      # the Desktop UI.
+      - name: Verify renderer container serves the UI through the gateway
+        run: node scripts/test_renderer_container.cjs codex-web:ci codex-web-gateway:ci
 
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'
@@ -178,6 +206,7 @@ jobs:
           build-args: |
             CODEX_VERSION=0.145.0
           tags: ${{ steps.publish-tags.outputs.build_tags }}
+          cache-from: type=gha,scope=renderer-image
 
       - name: Point mutable tags at existing SHA image
         if: env.PUBLISH == 'true' && steps.publish-tags.outputs.has_retag_tags == 'true'
