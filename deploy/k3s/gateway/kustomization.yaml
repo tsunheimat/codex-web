@@ -13,8 +13,8 @@ configMapGenerator:
   - name: codex-web-gateway-config
     files:
       - gateway.json=gateway.config.json
-# CI publishes this separate gateway image. Pin newTag to sha-<commit> from
-# the successful "gateway image" workflow before deploying a release.
+# The "ci" workflow publishes both images. Pin newTag to sha-<commit> from
+# a successful run on main before deploying a release.
 # Keep the generated ConfigMap hash: configuration edits trigger a rollout.
 images:
   - name: codex-web-gateway
