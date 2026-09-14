@@ -1,13 +1,14 @@
 # Remote session gateway
 
-This upgrade adds a standalone server and a responsive web/mobile client next
-to the existing desktop-compatible renderer. Both deployments remain available:
+This upgrade adds a standalone session server behind the existing
+desktop-compatible renderer. The original renderer is the only UI; the gateway
+owns sessions and execution-host connections:
 
-| Entry point                                      | UI and execution integration                                         |
-| ------------------------------------------------ | -------------------------------------------------------------------- |
-| `npm run server`                                 | Existing patched upstream renderer and Electron compatibility server |
-| `npm run gateway -- /absolute/path/gateway.json` | New persistent session service and app-server connectors             |
-| `npm run build:gateway:web`                      | Independent static client, also used by Capacitor                    |
+| Entry point                                      | UI and execution integration                                                                   |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `npm run server`                                 | Existing patched upstream renderer and Electron compatibility server with a local runtime      |
+| `npm run gateway -- /absolute/path/gateway.json` | Persistent session service and app-server connectors                                           |
+| `npm run server` with `CODEX_WEB_GATEWAY_URL`    | The same renderer and compatibility server, using one gateway backend instead of a local runtime |
 
 The gateway owns upstream connections. Closing, suspending, reloading, or replacing
 a client only detaches a viewer. A second device uses the same session ID and
@@ -27,7 +28,6 @@ multiple replicas against it.
 ```bash
 npm ci --ignore-scripts
 npm run build:server
-npm run build:gateway:web
 
 # Optional: required for the interactive terminal, not for coding sessions.
 npm rebuild node-pty --foreground-scripts
@@ -49,10 +49,10 @@ per-user accounts or OIDC access rules. API calls use an Authorization header.
 WebSockets authenticate in their first frame, with a five-second deadline and an
 exact Origin check. Tokens are never put in URLs, logs, or the backend listing.
 
-The web/mobile client keeps its token in memory. A cold launch requires signing
-in again. It caches session summaries, the current snapshot and drafts locally;
-Sign out clears the current server's caches. Device keychain enrollment and push
-notifications are not included in this iteration.
+Browsers never hold the token. The renderer's compatibility server keeps it in
+its own environment and opens the gateway connection on the page's behalf, so
+that server must itself sit behind an authenticating reverse proxy (see
+[Serve the original renderer in gateway mode](#serve-the-original-renderer-in-gateway-mode)).
 
 ## Configure execution hosts
 
@@ -204,51 +204,60 @@ attachments or Computer Use. Those remain capabilities of the official
 Desktop/Remote host and are reported separately from `codex` in the backend
 capability list.
 
-## Separate web and mobile deployments
+## Serve the original renderer in gateway mode
 
-The gateway can serve `scratch/gateway-web` through `webRoot`, or you can omit
-`webRoot` and deploy that directory on a separate static server. Enter the gateway
-URL at login. Add the exact frontend origin to `allowedOrigins`, for example:
-
-```json
-"allowedOrigins": [
-  "https://codex-ui.example.com",
-  "capacitor://localhost",
-  "https://localhost"
-]
-```
-
-No wildcard origins are accepted. The last two entries are for the packaged iOS
-and Android clients. Do not configure Capacitor's `server.url` or unrestricted
-navigation: the native shell must load the bundled client assets. The first
-client bundle is approximately 67 KiB gzipped; terminal code loads only when the
-terminal panel opens. Session caches are rendered during reconnection. The same
-static bundle includes an installable PWA manifest and a shell service worker.
-The worker caches only same-origin static assets and navigation shells; API,
-WebSocket, upload, download, and terminal requests always go to the live
-gateway. A PWA install does not make background JavaScript reliable; accepted
-work continues because the gateway owns the session.
+The compatibility server (`npm run server`, the default `Dockerfile`) can point
+the original Desktop renderer at one gateway backend. Nothing in the renderer is
+reimplemented: its Electron shell connects to the gateway's app-server endpoint
+for that backend exactly as it would connect to a local `codex app-server`, and
+the gateway answers the shell's protocol from the backend's sessions.
 
 ```bash
-# Generate the standard native projects on the development computer:
-npm run mobile:add:android
-npm run mobile:add:ios
-
-# After frontend changes:
-npm run mobile:sync
-npx cap open android
-npx cap open ios
+CODEX_WEB_GATEWAY_URL=https://codex.example.com \
+CODEX_WEB_GATEWAY_TOKEN=... \
+CODEX_WEB_GATEWAY_BACKEND=windows-desktop \
+CODEX_WEB_ALLOWED_ORIGINS=https://codex-ui.example.com \
+npm run server
 ```
 
-Android Studio/Android SDK and macOS/Xcode are needed for native builds. Choose
-your signing identity there. Generated `android/` and `ios/` projects are ignored;
-the checked-in Capacitor config and lockfile reproduce the shell. No signed APK,
-IPA, background-transfer integration or native secure-storage plugin is included.
+| Variable                             | Meaning                                                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `CODEX_WEB_GATEWAY_URL`              | Gateway origin, optionally with a path prefix. `https` unless loopback or `CODEX_WEB_GATEWAY_ALLOW_PLAIN_HTTP=true` on a private cluster network |
+| `CODEX_WEB_GATEWAY_TOKEN`            | The gateway access token (at least 32 characters); held only by this server process                        |
+| `CODEX_WEB_GATEWAY_BACKEND`          | The backend ID the renderer shows, for example the Windows Desktop                                          |
+| `CODEX_WEB_RUNTIME_OWNERSHIP`        | Set to `external` automatically: no local Codex runtime is spawned and no `codex` binary is needed         |
 
-The file input supports choosing photos/files in the WebView. The UI distinguishes
-an upload in progress from an accepted task. It does not claim that an upload
-continues after the OS suspends the WebView; finish the upload before closing the
-app. A task accepted by the gateway continues independently of the WebView.
+The compatibility server has no login of its own and it holds the gateway token,
+so the page it serves must be protected by your authenticating reverse proxy.
+The gateway's `/api/v1/*` routes are reached by that server, not by browsers, so
+the gateway's `allowedOrigins` list can stay empty for this deployment.
+
+What the renderer gets from a Desktop backend:
+
+- **Account.** The Windows bridge shares Desktop's signed-in ChatGPT identity and
+  access token with the gateway, so the renderer boots signed in as the Desktop
+  user and its ChatGPT calls (usage, tasks, onboarding) work. Start the bridge
+  with `--private-account` to withhold the token; the renderer then shows its
+  sign-in gate and Codex threads still work through Desktop.
+- **Sidebar.** The Desktop's projects (`local-projects`), projectless chats and
+  pins are read from Desktop's own global state and merged under the local
+  shell's values, so threads appear under the same project rows as in Desktop.
+  Project roots are checked on the Desktop host through the bridge.
+- **History and live turns.** Threads open in the renderer's legacy history mode
+  (one `thread/read`); turn, item and delta notifications are derived from the
+  bridge's follower snapshots. Prompts, steers and interrupts are journaled by
+  the gateway before Desktop runs them, and command/file/question approvals
+  are answered from the renderer's own approval UI.
+- **Images.** Images attached in Desktop are fetched through the gateway
+  (`/@fs/<path>` on the compatibility server, `files/image` on the gateway; only
+  images a followed conversation shows are readable). Images picked or pasted in
+  the browser are staged on the Desktop host before the turn is submitted.
+- **Not remote.** New conversations are started in Desktop and then opened here;
+  the renderer's "New chat" reports that. Remote Control, plugins, MCP server
+  and skill lists are answered as empty, and the file browser stays local.
+
+Set `CODEX_WEB_GATEWAY_ALLOW_PLAIN_HTTP=true` only for cluster-internal HTTP
+between the compatibility server and the gateway, as in the k3s manifests.
 
 ## Keep using the original renderer
 
@@ -377,8 +386,11 @@ behavior. It does not require retesting the user's established native features.
 `npm run test:gateway` covers real WebSocket connections to deterministic runtime
 fixtures, disconnect/reconnect, acknowledgement loss, durable restart recovery,
 approval races, host isolation, authentication/CORS and target-root file handling.
-`npm run build:gateway:web` also type-checks the shared client and UI. Additional
-browser and transport tests are documented in the PR's validation results.
+`npm run test:renderer:browser` drives the original renderer through the
+compatibility server in gateway mode against a fixture Desktop: sidebar project
+placement, history with an image, a prompt from the original composer, the
+Desktop reply and the mobile viewport. Additional browser and transport tests are
+documented in the PR's validation results.
 
 The legacy full `npm test` and browser lifecycle tests also require the prepared
 upstream desktop bundle and matching Codex runtime. Do not treat unavailable

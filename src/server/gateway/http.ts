@@ -7,6 +7,7 @@ import { type GatewayConfig } from "./config";
 import { SessionService } from "./service";
 import { fileOperation, MAX_UPLOAD_BYTES } from "./files";
 import { TerminalService } from "./terminal";
+import { attachRendererClient } from "./renderer-adapter";
 import { originAllowed } from "../http-origins";
 export { originAllowed } from "../http-origins";
 
@@ -31,9 +32,16 @@ export async function createGateway(
     maxPayload: 8 * 1024 * 1024,
     perMessageDeflate: false,
   });
+  const rendererWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: 16 * 1024 * 1024,
+    perMessageDeflate: false,
+  });
   const terminals = new TerminalService();
   const sockets = new Set<WebSocket>();
   const agents = new Set<WebSocket>();
+  const renderers = new Set<WebSocket>();
+  const RENDERER_PATH = /^\/api\/v1\/backends\/([A-Za-z0-9_-]{1,64})\/app-server$/;
   const backendForRequest = (
     backendId: string,
     sessionId: unknown,
@@ -207,17 +215,50 @@ export async function createGateway(
       return reply.code(400).send({
         error: `Invalid upload (maximum ${uploadLimit / 1024 / 1024} MiB)`,
       });
-    if (desktop)
-      return service.desktopUpload(request.params.id, b.sessionId, {
+    if (desktop) {
+      let sessionId = b.sessionId;
+      if (!sessionId && typeof b.threadId === "string") {
+        // The original renderer knows Desktop threads, not gateway sessions.
+        const session = service.store.findThread(request.params.id, b.threadId);
+        if (!session)
+          return reply
+            .code(409)
+            .send({ error: "Open the Desktop conversation before uploading" });
+        sessionId = session.id;
+      }
+      return service.desktopUpload(request.params.id, sessionId, {
         name: b.name,
         data: b.data,
         ...(b.uploadId ? { uploadId: b.uploadId } : {}),
       });
+    }
     return hostFileOperation(request.params.id, b.sessionId, {
       action: "upload",
       name: b.name,
       data: b.data,
     });
+  });
+  app.get("/api/v1/backends/:id/files/image", async (request: any, reply) => {
+    if (service.backend(request.params.id).transport.type !== "desktop")
+      return reply.code(409).send({ error: "Image reads require a Desktop backend" });
+    const filePath = request.query.path;
+    if (typeof filePath !== "string" || !filePath)
+      return reply.code(400).send({ error: "path is required" });
+    const file = await service.desktopReadFile(request.params.id, filePath);
+    if (typeof file?.dataBase64 !== "string" || typeof file?.contentType !== "string")
+      return reply.code(502).send({ error: "Desktop returned no image" });
+    return reply
+      .header("Content-Type", file.contentType)
+      .header("Content-Security-Policy", "sandbox; default-src 'none'")
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Cache-Control", "private, max-age=300")
+      .send(Buffer.from(file.dataBase64, "base64"));
+  });
+  app.get("/api/v1/backends/:id/global-state", async (request: any, reply) => {
+    if (service.backend(request.params.id).transport.type !== "desktop")
+      return reply.code(409).send({ error: "Global state requires a Desktop backend" });
+    const state = await service.desktopGlobalState(request.params.id);
+    return { values: state?.values && typeof state.values === "object" ? state.values : {} };
   });
   app.get("/api/v1/backends/:id/download", async (request: any, reply) => {
     const result = await hostFileOperation(
@@ -248,6 +289,32 @@ export async function createGateway(
   }
   app.server.on("upgrade", (request, socket, head) => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+    const renderer = RENDERER_PATH.exec(pathname);
+    if (renderer) {
+      // The renderer shell is a server-side client: it authenticates with the
+      // gateway token in the upgrade request, never in the URL.
+      const authorization = request.headers.authorization ?? "";
+      const backendId = renderer[1]!;
+      if (
+        !tokenMatches(config.token, authorization.replace(/^Bearer\s+/i, "")) ||
+        !service.backends.some((b) => b.id === backendId) ||
+        renderers.size >= 16
+      ) {
+        socket.destroy();
+        return;
+      }
+      rendererWss.handleUpgrade(request, socket, head, (ws) => {
+        renderers.add(ws);
+        ws.on("close", () => renderers.delete(ws));
+        ws.on("error", () => {});
+        try {
+          attachRendererClient(service, backendId, ws);
+        } catch {
+          ws.close(1011, "Backend unavailable");
+        }
+      });
+      return;
+    }
     if (pathname === "/api/v1/agent" || pathname === "/api/v1/desktop") {
       if (sockets.size + agents.size >= 64) {
         socket.destroy();
@@ -498,23 +565,14 @@ export async function createGateway(
       });
     });
   });
-  if (config.webRoot) {
-    await app.register(fastifyStatic, {
-      root: config.webRoot,
-      prefix: "/",
-      setHeaders: (res) => {
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("X-Content-Type-Options", "nosniff");
-      },
-    });
-    app.get("/", async (_request, reply) => reply.sendFile("index.html"));
-  }
   app.addHook("onClose", async () => {
     terminals.close();
     for (const socket of sockets) socket.terminate();
     for (const socket of agents) socket.terminate();
+    for (const socket of renderers) socket.terminate();
     wss.close();
     agentWss.close();
+    rendererWss.close();
     await service.close();
   });
   return app;

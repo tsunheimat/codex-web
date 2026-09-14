@@ -1,10 +1,19 @@
 # Windows connector for the running Codex Desktop
 
-The web/mobile client connects to the codex-web gateway. The Windows connector
-opens an outbound authenticated WSS connection to that gateway and forwards
-supported operations to the already-running Desktop through its local pipes.
-Desktop owns the account, conversations and execution. There is no inbound Windows
-listener, replacement app-server, Desktop patch or User-Agent change.
+The original Codex Desktop renderer, served by codex-web in gateway mode, connects
+to the codex-web gateway. The Windows connector opens an outbound authenticated
+WSS connection to that gateway and forwards supported operations to the
+already-running Desktop through its local pipes. Desktop owns the account,
+conversations and execution. There is no inbound Windows listener, replacement
+app-server, Desktop patch or User-Agent change.
+
+The connector shares Desktop's signed-in ChatGPT identity and token with the
+gateway so the remote renderer boots signed in as that user. Pass
+`--private-account` to the bridge (`-PrivateAccount` on the launcher's Configure
+action) to withhold the token; the renderer then shows its sign-in gate while
+Codex threads keep working through Desktop. It also reads Desktop's project list and projectless
+thread bookkeeping from `.codex-global-state.json` so the remote sidebar matches
+Desktop's, and checks project roots exist on request.
 
 ## Prepare the gateway
 

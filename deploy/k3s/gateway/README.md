@@ -1,14 +1,17 @@
 # Desktop gateway on k3s
 
-Deploy this directory as a separate gateway service. It serves the web/mobile UI
-and relays supported operations to the existing Windows Codex Desktop. The Windows
-connector opens an outbound WSS connection; the cluster needs no Windows inbound
-port, Desktop account credentials or replacement execution runtime.
+Deploy this directory as two services in one namespace: the gateway, which
+relays supported operations to the existing Windows Codex Desktop, and the
+original Codex Desktop renderer served by its compatibility server in gateway
+mode. The Windows connector opens an outbound WSS connection; the cluster needs
+no Windows inbound port, Desktop account credentials or replacement execution
+runtime.
 
-This deployment uses `Dockerfile.gateway`, port **8215**, namespace
-`codex-web-gateway`, and backend ID **windows-desktop**. The existing
-`deploy/k3s/deployment.yaml` and default Dockerfile run the original server; they
-are independent of this deployment.
+The gateway uses `Dockerfile.gateway` (image `codex-web-gateway`), port **8215**,
+namespace `codex-web-gateway` and backend ID **windows-desktop**. The renderer
+uses the repository's default `Dockerfile` (image `codex-web`) on port **8214**
+with `CODEX_WEB_GATEWAY_URL` pointing at the gateway Service. Browsers reach the
+renderer at `/` and the gateway under `/api/`.
 
 ## 1. Choose the host, image and storage
 
@@ -20,15 +23,16 @@ Edit these files before applying:
 
 | File                  | Set                                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `kustomization.yaml`  | Keep `ghcr.io/tsunheimat/codex-web-gateway`; set `newTag` to `sha-<full commit SHA>` from a successful gateway image workflow |
-| `ingress.yaml`        | Both occurrences of `codex.example.com` to the gateway DNS hostname                                                           |
-| `gateway.config.json` | The matching HTTPS URL in `allowedOrigins`; the real Windows project path in `cwd`                                            |
+| `kustomization.yaml`  | Set both `newTag` values to `sha-<full commit SHA>` from the successful gateway image and container image workflows           |
+| `ingress.yaml`        | Set the HTTPRoute hostname and backend namespace for the cluster Gateway; attach your authentication policy to the `/` rule  |
+| `web-deployment.yaml` | `CODEX_WEB_ALLOWED_ORIGINS` to the exact HTTPS origin of the hostname                                                        |
+| `gateway.config.json` | The real Windows project path in `cwd`; `allowedOrigins` may stay as is because browsers never call the gateway directly      |
 | `storage.yaml`        | Keep `local-path` for standard k3s, or choose a suitable block-storage class                                                  |
 
-Point the hostname's DNS record at the reachable Traefik ingress address. This
-example assumes Traefik's `websecure` entrypoint and a TLS certificate trusted by
-both Windows and the browser. If your cluster uses another ingress controller,
-adapt `ingressClassName` and the controller-specific annotations.
+Point the hostname's DNS record at the reachable Gateway address. This deployment
+uses the cluster's `main-tsunhei` Gateway and its wildcard TLS certificate; the
+HTTPRoute is cross-namespace and therefore requires an appropriate
+`ReferenceGrant` in the Gateway namespace.
 
 The gateway stores its SQLite database under `/data`. Keep **one replica** and the
 **Recreate** deployment strategy; do not attach multiple gateway writers to this
@@ -53,6 +57,11 @@ Version tags also publish the matching semver tag; other Git tags publish the SH
 tag only. The workflow can be run manually on `main`. Existing SHA tags are reused
 on reruns. Actions authenticates using its built-in `GITHUB_TOKEN` with package
 write permission; no Desktop token or cluster credential is used in the build.
+
+The renderer image `ghcr.io/tsunheimat/codex-web:sha-<full commit SHA>` comes
+from the [container image workflow](../../../.github/workflows/container-image.yml)
+for the same commit. It contains the prepared upstream renderer bundle and the
+compatibility server; in gateway mode it spawns no Codex runtime.
 
 Wait for **gateway image** to finish successfully, then copy its SHA tag from the
 job summary to `newTag` in `kustomization.yaml`. The example defaults to `latest`
@@ -125,14 +134,19 @@ kubectl -n codex-web-gateway create secret tls codex-web-gateway-tls \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Alternatively, use your installed cert-manager issuer to manage this TLS Secret;
-add its actual issuer annotation to `ingress.yaml`. No particular issuer or
-certificate controller is assumed by these files.
+The shared Gateway terminates TLS, so no per-gateway TLS Secret is created here.
+If the cluster does not provide that Gateway, install/configure an equivalent
+Gateway and update `parentRefs` before applying.
 
-The ingress routes `/` to the gateway, including `/api/v1/desktop` for the Windows
-connector and `/api/v1/events` for viewers. Traefik handles WebSocket upgrades
-without extra middleware. Avoid attaching a browser-only login redirect to the
-Desktop socket route; the connector authenticates using its own first-frame token.
+The HTTPRoute sends `/api/` (including `/api/v1/desktop` for the Windows
+connector) and `/healthz` to the gateway, and everything else to the renderer's
+compatibility server: the page, its `/__backend/` IPC WebSocket and `/@fs/`
+image reads. Traefik handles WebSocket upgrades without extra middleware. The
+compatibility server has no login and holds the gateway token, so attach the
+cluster's authenticating policy (for example a forward-auth filter) to the `/`
+rule before exposing the hostname beyond a trusted network. Do not attach a
+browser login redirect to the `/api/` rule; the connector authenticates using
+its own first-frame token.
 An additional upstream proxy must also preserve WebSockets and allow the image
 upload request sizes (up to the gateway's 15 MiB HTTP body limit).
 [Traefik Ingress TLS](https://doc.traefik.io/traefik/reference/routing-configuration/kubernetes/ingress/),
@@ -145,16 +159,19 @@ kubectl kustomize deploy/k3s/gateway
 kubectl apply --dry-run=server -k deploy/k3s/gateway
 kubectl apply -k deploy/k3s/gateway
 kubectl -n codex-web-gateway rollout status deployment/codex-web-gateway --timeout=180s
-kubectl -n codex-web-gateway get pods,svc,ingress,pvc
-curl --fail https://codex.example.com/healthz
+kubectl -n codex-web-gateway rollout status deployment/codex-web-desktop-ui --timeout=180s
+kubectl -n codex-web-gateway get pods,svc,httproute,pvc
+curl --fail https://codex-test.test.tsunhei.com/healthz
 ```
 
-Replace the URL in the last command. The health response is `{"ok":true}`. The
+The health response is `{"ok":true}`. The
 gateway can be healthy while Windows is offline; health probes deliberately check
 the service, not whether a Desktop is currently attached.
 
-Open the same HTTPS address in your browser and sign in with
-`CODEX_WEB_GATEWAY_TOKEN`. Configure the Windows connector with:
+Open the same HTTPS address in your browser: the original Codex Desktop UI
+loads, signed in as the Desktop's ChatGPT account once the connector is running
+(no token prompt; the renderer's server holds the viewer token). Configure the
+Windows connector with:
 
 ```text
 Gateway:    https://your-actual-gateway-hostname
@@ -163,9 +180,9 @@ Token:      the value of CODEX_WEB_DESKTOP_AGENT_TOKEN
 ```
 
 Run Windows **Check**, then **Run** or **InstallStartup**. Check is temporary and
-disconnects when finished. A persistent run should make **Windows Codex Desktop**
-appear connected in the web client. Open an existing Desktop-owned task.
-See [Windows setup](../../../docs/windows-desktop-connector.md).
+disconnects when finished. With a persistent run the sidebar lists Desktop's
+projects and chats; open an existing Desktop-owned chat, send a prompt and
+watch Desktop answer. See [Windows setup](../../../docs/windows-desktop-connector.md).
 
 For a local HTTP health check without ingress, run
 `kubectl -n codex-web-gateway port-forward service/codex-web-gateway 8215:8215`,
@@ -196,6 +213,9 @@ kubectl -n codex-web-gateway describe pvc codex-web-gateway-data
 | Windows reports certificate failure | Certificate hostname and chain; configure its private CA on Windows if applicable |
 | Windows handshake rejected          | Backend ID and agent token match; only one bridge occupies that ID                |
 | Gateway healthy, Desktop offline    | Start Desktop and its Windows connector; inspect the connector log                |
+| Page shows "Sign in to ChatGPT"     | The connector was configured with `-PrivateAccount`, or Desktop itself is signed out |
+| Sidebar shows no chats              | Connector offline, or the chat is not in Desktop's session index / project list  |
+| Page loads but never connects       | `CODEX_WEB_GATEWAY_TOKEN` in the tokens Secret; renderer pod logs name the gateway URL |
 
 This deployment enables the existing gateway connection. Native ChatGPT photo
 submission and direct Computer Use controls still require the missing verified

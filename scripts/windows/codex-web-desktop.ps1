@@ -7,6 +7,9 @@ param(
     [string]$Gateway,
     [string]$TokenEnv = 'CODEX_WEB_DESKTOP_AGENT_TOKEN',
     [string]$CaCertificate,
+    # Configure only: keep Desktop's ChatGPT token on this computer. The remote
+    # renderer then shows its sign-in gate while Codex threads keep working.
+    [switch]$PrivateAccount,
     [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'codex-web\desktop')
 )
 
@@ -76,12 +79,19 @@ if ($Action -eq 'Configure') {
         if ($secureToken.Length -lt 32) { throw 'The bridge token must have at least 32 characters.' }
     }
     New-Item -ItemType Directory -Path $connectorRoot -Force | Out-Null
-    $acl = Get-Acl -LiteralPath $connectorRoot
+    # Set only the DACL. Reapplying Get-Acl's owner/audit sections can require
+    # SeSecurityPrivilege when configuring an already-protected directory.
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.SetAccessRule($rule)
-    Set-Acl -LiteralPath $connectorRoot -AclObject $acl
+    $directory = [IO.DirectoryInfo]::new($connectorRoot)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::SetAccessControl($directory, $acl)
+    } else {
+        $directory.SetAccessControl($acl)
+    }
 
     # Copy only the connector runtime to local storage. No Desktop files are touched.
     New-Item -ItemType Directory -Path (Join-Path $runtimeRoot 'scripts\windows'), (Join-Path $runtimeRoot 'scripts\desktop\native'), (Join-Path $runtimeRoot 'node_modules') -Force | Out-Null
@@ -106,7 +116,7 @@ if ($Action -eq 'Configure') {
     }
     $secureToken | ConvertFrom-SecureString | Set-Content -LiteralPath $secretPath -Encoding UTF8
     $secureToken.Dispose()
-    [ordered]@{ version = 1; backend = $Backend; gateway = $gatewayUrl; node = $nodePath; caCertificate = $caPath } |
+    [ordered]@{ version = 1; backend = $Backend; gateway = $gatewayUrl; node = $nodePath; caCertificate = $caPath; privateAccount = [bool]$PrivateAccount } |
         ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
     Write-Output "Configured $Backend. Token protected for this Windows user. Local runtime: $runtimeRoot"
     Write-Output 'Use -Action Check to verify the connection, then -Action Run or -Action InstallStartup.'
@@ -136,9 +146,18 @@ if ($Action -eq 'RemoveStartup') {
 $connection = Read-Connection
 $null = Assert-Gateway $connection.gateway
 if ($Action -eq 'InstallStartup') {
-    $command = '& ' + (Quote-Literal $installedScript) + ' -Action Run -Backend ' + (Quote-Literal $Backend) + ' -DataRoot ' + (Quote-Literal $DataRoot)
+    # MSIX-packaged parents can virtualize AppData. Task Scheduler runs outside
+    # that virtualization, so persist the actual filesystem paths in its action.
+    $physicalScript = & $connection.node -e 'process.stdout.write(require("fs").realpathSync.native(process.argv[1]))' $installedScript
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the installed connector path.' }
+    $physicalDataRoot = & $connection.node -e 'process.stdout.write(require("fs").realpathSync.native(process.argv[1]))' $DataRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the connector data path.' }
+    $startupLog = Join-Path (Join-Path $physicalDataRoot $Backend) 'startup.log'
+    $command = '& ' + (Quote-Literal $physicalScript) + ' -Action Run -Backend ' + (Quote-Literal $Backend) + ' -DataRoot ' + (Quote-Literal $physicalDataRoot) + ' *> ' + (Quote-Literal $startupLog)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-    $taskAction = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded" -WorkingDirectory $runtimeRoot
+    # Task Scheduler validates its working directory before user impersonation.
+    # Use the system directory; the connector and its state use absolute paths.
+    $taskAction = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded" -WorkingDirectory (Join-Path $env:WINDIR 'System32')
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
     $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
@@ -162,6 +181,7 @@ try {
     if ($connection.caCertificate) { $env:NODE_EXTRA_CA_CERTS = $connection.caCertificate }
     $bridgeArgs = @((Join-Path $runtimeRoot 'scripts\codex_web_desktop_bridge.cjs'), '--gateway', $connection.gateway, '--backend', $Backend, '--state', (Join-Path $connectorRoot 'commands.sqlite'))
     if ($Action -eq 'Check') { $bridgeArgs += '--check' } else { $bridgeArgs += '--wait-for-desktop' }
+    if ($connection.privateAccount -eq $true) { $bridgeArgs += '--private-account' }
     # Windows PowerShell represents native stderr as ErrorRecords; diagnostic output is not a launch failure.
     $ErrorActionPreference = 'Continue'
     & $connection.node @bridgeArgs 2>&1 | ForEach-Object {

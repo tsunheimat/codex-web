@@ -44,6 +44,14 @@ import {
 } from "./renderer-recovery";
 import { registerWorkspaceFileRoutes } from "./workspace-file-routes";
 import {
+  GatewayFileClient,
+  GatewayGlobalStateOverlay,
+  configureShellEnvironment,
+  isWindowsPath,
+  readGatewayMode,
+  stageRendererImages,
+} from "./gateway-mode";
+import {
   decodeMessagePortData,
   encodeMessagePortData,
 } from "./message-port-data";
@@ -483,6 +491,14 @@ function createServerCleanupAuthority({
 }
 
 async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
+  // Gateway mode: the shell's app-server is a gateway backend (for example the
+  // running Windows Codex Desktop), so no local Codex runtime is owned here.
+  const gatewayMode = readGatewayMode(process.env);
+  if (gatewayMode) configureShellEnvironment(gatewayMode, process.env);
+  const gatewayFiles = gatewayMode ? new GatewayFileClient(gatewayMode) : null;
+  const gatewayGlobalState = gatewayFiles
+    ? new GatewayGlobalStateOverlay(gatewayFiles)
+    : null;
   const ownership = process.env.CODEX_WEB_RUNTIME_OWNERSHIP;
   if (ownership && ownership !== "owned" && ownership !== "external")
     throw new Error("CODEX_WEB_RUNTIME_OWNERSHIP must be owned or external");
@@ -649,6 +665,9 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
   await startupStep(() =>
     registerWorkspaceFileRoutes(app, workspaceFileAuthority, {
+      remoteImageReader: gatewayFiles
+        ? (filePath) => gatewayFiles.readImage(filePath)
+        : undefined,
       cleanupOnClose: false,
     }),
   );
@@ -706,6 +725,14 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   });
 
   bridgeState.broadcastToRenderer = (message: MainToRendererMessage): void => {
+    if (gatewayGlobalState?.claims(message)) {
+      // Sidebar bookkeeping answers carry the Desktop's projects too.
+      void gatewayGlobalState
+        .rewrite(message)
+        .catch(() => message)
+        .then((event) => rendererRecovery.broadcastRuntimeMessage(event));
+      return;
+    }
     rendererRecovery.broadcastRuntimeMessage(message);
   };
 
@@ -879,25 +906,36 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 
     if (message.type === "ipc-renderer-invoke") {
       const { requestId } = message;
+      const invoke = async (
+        sanitizedChannel: string,
+        sanitizedArgs: unknown[],
+      ) =>
+        await (bridgeState.handleRendererInvoke?.(
+          sanitizedChannel,
+          sanitizedArgs,
+        ) ??
+          Promise.reject(
+            new Error(
+              `[ipc-bridge] no ipcMain.handle for channel ${sanitizedChannel}`,
+            ),
+          ));
       Promise.resolve()
-        .then(() =>
-          invokeRendererRequest(
+        .then(async () => {
+          if (gatewayFiles) {
+            // Remote host paths belong to the gateway backend; only renderer
+            // images are copied across before the turn leaves this process.
+            gatewayGlobalState?.observeInvoke(message);
+            await stageRendererImages(message, workspaceFileAuthority, gatewayFiles);
+            return invoke(message.channel, message.args);
+          }
+          return invokeRendererRequest(
             message,
             workspaceFileAuthority.browseRoot,
-            async (sanitizedChannel, sanitizedArgs) =>
-              await (bridgeState.handleRendererInvoke?.(
-                sanitizedChannel,
-                sanitizedArgs,
-              ) ??
-                Promise.reject(
-                  new Error(
-                    `[ipc-bridge] no ipcMain.handle for channel ${sanitizedChannel}`,
-                  ),
-                )),
+            invoke,
             os.homedir(),
             workspaceFileAuthority.projectBrowseRoot,
-          ),
-        )
+          );
+        })
         .then((result) => {
           session.send({
             type: "ipc-renderer-invoke-result",

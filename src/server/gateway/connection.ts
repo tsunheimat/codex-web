@@ -235,8 +235,10 @@ export class AppServerConnection extends EventEmitter {
     }
   }
 
+  /** The runtime's last initialize result, replayed to renderer clients. */
+  initializeResult: any = null;
   private async initialize(epoch: string): Promise<void> {
-    await this.rpc("initialize", {
+    this.initializeResult = await this.rpc("initialize", {
       clientInfo: {
         name: "codex_web_gateway",
         title: "Codex Web Gateway",
@@ -373,6 +375,9 @@ export class AppServerConnection extends EventEmitter {
       id,
       error: { code: -32601, message: "Client capability unavailable" },
     });
+  }
+  respondError(id: string | number, error: { code: number; message: string }): void {
+    this.send({ id, error });
   }
 
   private send(message: unknown): void {

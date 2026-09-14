@@ -1,0 +1,13 @@
+--- a/.vite/build/src-DfDAEPNR.js
++++ b/.vite/build/src-DfDAEPNR.js
+@@ -35002,7 +35002,9 @@
+   return !t || typeof t != `string` ? null : t;
+ }
+ async function LR(e) {
+-  return {};
++  // codex-web: authenticate the gateway app-server WebSocket with a header.
++  let t = process.env.CODEX_APP_SERVER_WS_AUTHORIZATION?.trim();
++  return t ? { authorization: t } : {};
+ }
+ var RR = 4 * 1024 * 1024,
+   zR = 32,

@@ -1,26 +1,38 @@
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: codex-web-gateway
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls: "true"
+  namespace: codex-web-gateway
 spec:
-  ingressClassName: traefik
-  tls:
-    - hosts:
-        - codex.example.com
-      secretName: codex-web-gateway-tls
+  parentRefs:
+    - name: main-tsunhei
+      namespace: default
+  hostnames:
+    - codex-test.test.tsunhei.com
   rules:
-    - host: codex.example.com
-      http:
-        paths:
-          # One route serves the web client, API, viewer WS and Desktop WS.
-          # Traefik supports WebSocket upgrades without an extra middleware.
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: codex-web-gateway
-                port:
-                  name: http
+    # Gateway API: viewer sessions, uploads, the Windows connector's WebSocket
+    # (/api/v1/desktop) and the renderer's app-server WebSocket.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+        - path:
+            type: Exact
+            value: /healthz
+      backendRefs:
+        - name: codex-web-gateway
+          namespace: codex-web-gateway
+          port: 8215
+    # Everything else is the original Codex Desktop renderer: its static
+    # assets, the /__backend/ IPC bridge WebSocket and /@fs/ image reads.
+    # The compatibility server has no login of its own: attach the cluster's
+    # authenticating policy (for example a forward-auth filter) to this rule
+    # before exposing the hostname beyond a trusted network.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: codex-web-desktop-ui
+          namespace: codex-web-gateway
+          port: 8214

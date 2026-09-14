@@ -104,3 +104,29 @@ important bits related to wiring up the ipc bridge.
 
 [preload script]: https://www.electronjs.org/docs/latest/tutorial/tutorial-preload
 [`ipcRenderer`]: https://www.electronjs.org/docs/latest/api/ipc-renderer
+
+## gateway mode
+
+the compatibility server can run without a local codex runtime. with
+`CODEX_WEB_GATEWAY_URL`, `CODEX_WEB_GATEWAY_TOKEN` and
+`CODEX_WEB_GATEWAY_BACKEND` set ([gateway-mode.ts](./src/server/gateway-mode.ts)),
+it points the unpacked electron main process at the gateway's app-server
+websocket for one backend (`CODEX_APP_SERVER_WS_URL`, which the upstream shell
+already honours) and adds the bearer token with a one-line shell patch
+([shell-app-server-ws-authorization.patch](./patches/shell-app-server-ws-authorization.patch)).
+
+on the gateway, [renderer-adapter.ts](./src/server/gateway/renderer-adapter.ts)
+speaks the app-server json-rpc the shell expects. for an app-server backend it
+is a pass-through. for a windows desktop backend it answers the shell from the
+gateway's own state: `thread/list` and `thread/read` from bridge snapshots,
+`turn/*` as journaled gateway commands, approvals as server requests, and
+`turn/started`, `item/*`, `turn/completed` notifications from snapshot diffs.
+threads report legacy history mode so the renderer reads them in one call.
+
+three renderer needs are served around the protocol rather than by patching the
+renderer: the desktop's projects and projectless-thread bookkeeping are merged
+into the shell's `get-global-state` answers so the sidebar places threads like
+desktop does; `fs/getMetadata` is forwarded so project roots resolve on the
+desktop host; and `/@fs/` image reads fall back to the gateway's `files/image`
+route for images a followed desktop conversation shows. browser-picked images
+are staged on the desktop through the gateway before the turn is forwarded.
