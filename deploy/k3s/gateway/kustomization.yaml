@@ -20,9 +20,9 @@ configMapGenerator:
 images:
   - name: codex-web-gateway
     newName: ghcr.io/tsunheimat/codex-web-gateway
-    newTag: sha-7840081821ec2619cee0c29029ffdf0d3b26235a
+    newTag: sha-d44841ebac92486ea903fe0c70ba86aff3b94e3c
   # The original-renderer compatibility server image (the repository's default
   # Dockerfile), published by the same workflow run. Pin the same commit.
   - name: codex-web
     newName: ghcr.io/tsunheimat/codex-web
-    newTag: sha-7840081821ec2619cee0c29029ffdf0d3b26235a
+    newTag: sha-d44841ebac92486ea903fe0c70ba86aff3b94e3c
