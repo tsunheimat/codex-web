@@ -494,7 +494,10 @@ class DesktopBridge extends EventEmitter {
       case "desktop/upload":
         return this.session.upload(p);
       case "desktop/chatgpt/list": {
-        const result = await this.native().call("list_threads", { limit: 50 });
+        const result = await this.native().call("list_threads", {
+          limit: Number.isInteger(p.limit) ? Math.min(Math.max(p.limit, 1), 1000) : 1000,
+          ...(p.cursor ? { cursor: String(p.cursor) } : {}),
+        });
         return {
           data: nativeRows(result)
             .filter(isChatGpt)
@@ -503,7 +506,7 @@ class DesktopBridge extends EventEmitter {
               name: row.title,
               conversationKind: "chatgpt",
             })),
-          nextCursor: null,
+          nextCursor: result?.nextCursor ?? result?.cursor ?? null,
         };
       }
       case "desktop/chatgpt/read": {

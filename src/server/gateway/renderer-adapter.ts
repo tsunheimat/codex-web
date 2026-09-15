@@ -258,19 +258,15 @@ export class DesktopRendererClient extends RendererClient {
         this.account = { ...this.account, ...result };
         return result;
       }
-    } catch {
-      /* Older bridges do not expose the account; fall through. */
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Desktop account/read failed";
+      throw new RpcError(
+        `Windows Codex Desktop account unavailable: ${message}. Upgrade the bridge if account/read is unsupported, or sign in on Desktop.`,
+        -32002,
+      );
     }
-    return (
-      this.account ?? {
-        account: {
-          type: "chatgpt",
-          email: "Windows Codex Desktop",
-          planType: null,
-        },
-        requiresOpenaiAuth: true,
-      }
-    );
+    if (this.account) return this.account;
+    throw new RpcError("Windows Codex Desktop returned no account identity", -32002);
   }
 
   protected async onRequest(
@@ -366,6 +362,24 @@ export class DesktopRendererClient extends RendererClient {
         return { status: "unavailable" };
       case "thread/list":
         return this.listThreads(p);
+      case "chatgpt/list":
+        return this.listThreads({ ...p, conversationKind: "chatgpt" });
+      case "chatgpt/read": {
+        const id = typeof p.conversationId === "string" ? p.conversationId : p.threadId;
+        if (!id) throw new RpcError("conversationId is required", -32602);
+        const session = await this.importConversation(id, "chatgpt");
+        return { conversation: session.nativeConversation ?? session.thread, conversationId: id };
+      }
+      case "chatgpt/send": {
+        const conversationId = typeof p.conversationId === "string" ? p.conversationId : p.threadId;
+        if (!conversationId) throw new RpcError("conversationId is required", -32602);
+        const session = await this.importConversation(conversationId, "chatgpt");
+        const { conversationId: _conversationId, threadId: _threadId, ...sendParams } = p;
+        const command = this.service.submit(session.id, { clientCommandId: this.clientCommandId(id, method), method: "chatgpt/send", params: sendParams });
+        const done = await this.waitForCommand(command);
+        if (done.state !== "accepted") throw new RpcError(commandError(done).message, commandError(done).code);
+        return done.result ?? {};
+      }
       case "thread/read":
         return { thread: await this.readThread(p.threadId, p.includeTurns !== false) };
       case "thread/resume":
@@ -429,11 +443,9 @@ export class DesktopRendererClient extends RendererClient {
   }
 
   private async listThreads(p: any): Promise<any> {
-    if (p.archived === true) return { ...EMPTY_PAGE, backwardsCursor: null };
+    const kind = p.conversationKind === "chatgpt" ? "chatgpt" : "codex";
     const backend = this.service.backend(this.backendId);
-    const listed = await this.service.listThreads(this.backendId).catch(() => ({
-      data: [],
-    }));
+    const listed = await this.service.listThreads(this.backendId, kind, p.cursor);
     const rows: any[] = Array.isArray(listed?.data) ? listed.data : [];
     const data = rows
       .filter((row) => typeof row?.id === "string")
@@ -443,14 +455,25 @@ export class DesktopRendererClient extends RendererClient {
           (typeof row.name === "string" && row.name !== row.id ? row.name : "") ||
           (session && session.title !== "New conversation" ? session.title : "") ||
           "";
-        return this.toThread(
+        return kind === "chatgpt"
+          ? { id: row.id, conversationId: row.id, title: row.name ?? row.id, conversationKind: kind, preview: row.name ?? row.id }
+          : this.toThread(
           row.id,
           session ?? null,
           { name, cwd: session?.cwd ?? backend.cwd },
           false,
-        );
+            );
       });
-    return { data, nextCursor: null, backwardsCursor: null };
+    return { data, nextCursor: listed?.nextCursor ?? null, backwardsCursor: listed?.backwardsCursor ?? null };
+  }
+
+  private async importConversation(id: string, kind: "chatgpt" | "codex"): Promise<Session> {
+    const existing = this.service.store.findThread(this.backendId, id);
+    if (existing) { await this.service.attachSession(existing.id); return this.service.store.get(existing.id); }
+    const command = this.service.create({ clientCommandId: `renderer-import-${randomUUID()}`, backendId: this.backendId, conversationId: id, conversationKind: kind });
+    const done = await this.waitForCommand(command);
+    if (done.state !== "accepted") throw new RpcError(commandError(done).message, commandError(done).code);
+    return this.service.store.get(command.sessionId);
   }
 
   private async importThread(threadId: string): Promise<Session> {

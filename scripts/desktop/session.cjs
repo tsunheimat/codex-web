@@ -671,7 +671,6 @@ class DesktopSession extends EventEmitter {
       )
         .trim()
         .split("\n")
-        .slice(-100)
         .reverse();
     } catch {}
     const candidates = [...this.followed.keys()];
@@ -686,7 +685,7 @@ class DesktopSession extends EventEmitter {
       } catch {}
     }
     const data = [];
-    for (const id of [...new Set(candidates)].slice(0, 30)) {
+    for (const id of [...new Set(candidates)]) {
       try {
         await this.owner(id);
         data.push({
@@ -694,7 +693,7 @@ class DesktopSession extends EventEmitter {
           name: titles.get(id) ?? id,
           conversationKind: "codex",
         });
-      } catch {}
+      } catch (error) { this.diagnose?.(`Unable to attach Desktop conversation ${id}: ${error.message}`); }
     }
     return { data, nextCursor: null };
   }

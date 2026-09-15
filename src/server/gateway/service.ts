@@ -697,7 +697,7 @@ export class SessionService extends EventEmitter {
     // The viewer already has the newer projection; completion will reconcile.
   }
 
-  async listThreads(id: string, kind = "codex"): Promise<any> {
+  async listThreads(id: string, kind = "codex", cursor?: string): Promise<any> {
     this.backend(id);
     if (!["codex", "chatgpt"].includes(kind))
       throw Object.assign(new Error("Invalid conversation kind"), {
@@ -706,7 +706,8 @@ export class SessionService extends EventEmitter {
     return this.connections
       .get(id)!
       .request(kind === "chatgpt" ? "chatgpt/list" : "thread/list", {
-        limit: 30,
+        limit: 1000,
+        ...(cursor ? { cursor } : {}),
       });
   }
   /** Account identity held by the Windows Desktop's own credential store. */
