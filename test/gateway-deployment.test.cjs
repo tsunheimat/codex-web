@@ -70,7 +70,7 @@ test("HTTPRoute sends the page to the renderer and the API to the gateway", () =
 
 test("renderer deployment gives UID 1000 a writable Codex home on a read-only root", () => {
   assert.match(webDeployment, /runAsNonRoot: true\n\s+runAsUser: 1000\n\s+runAsGroup: 1000\n\s+fsGroup: 1000/);
-  assert.equal((webDeployment.match(/readOnlyRootFilesystem: true/g) ?? []).length, 2);
+  assert.equal((webDeployment.match(/readOnlyRootFilesystem: true/g) ?? []).length, 3);
   assert.deepEqual(mountPaths(webDeployment, "desktop-ui").sort(), [
     "/home/codex-web",
     "/home/codex-web/.codex",
@@ -100,8 +100,11 @@ test("renderer image owns its home for the deployment user", () => {
 
 test("renderer deployment waits for the gateway and probes /healthz over HTTP", () => {
   assert.match(webDeployment, /initContainers:\n(.*\n)*?\s+- name: wait-for-gateway\n/);
-  assert.match(webDeployment, /value: http:\/\/codex-web-gateway:8215/);
-  assert.equal((webDeployment.match(/image: codex-web:desktop-ui/g) ?? []).length, 2);
+  assert.match(webDeployment, /name: gateway-loopback\n\s+image: codex-web:desktop-ui\n\s+imagePullPolicy: Always\n\s+restartPolicy: Always/);
+  assert.match(webDeployment, /net\.connect\(8215, "codex-web-gateway"\)/);
+  assert.match(webDeployment, /\.listen\(8215, "127\.0\.0\.1"\)/);
+  assert.equal((webDeployment.match(/CODEX_WEB_GATEWAY_URL\n\s+value: http:\/\/127\.0\.0\.1:8215/g) ?? []).length, 2);
+  assert.equal((webDeployment.match(/image: codex-web:desktop-ui/g) ?? []).length, 3);
   for (const probe of ["startupProbe", "readinessProbe", "livenessProbe"])
     assert.match(
       webDeployment,
@@ -159,7 +162,7 @@ test("rendered kustomization contains both deployments and the route", (t) => {
   const kinds = [...rendered.matchAll(/^kind: (\S+)$/gm)].map((m) => m[1]).sort();
   assert.deepEqual(kinds, ["ConfigMap", "Deployment", "Deployment", "HTTPRoute", "Namespace", "PersistentVolumeClaim", "Service", "Service"]);
   const tag = kustomization.match(/newTag: (sha-[0-9a-f]{40})/)[1];
-  assert.equal((rendered.match(new RegExp(`image: ghcr.io/tsunheimat/codex-web:${tag}`, "g")) ?? []).length, 2);
+  assert.equal((rendered.match(new RegExp(`image: ghcr.io/tsunheimat/codex-web:${tag}`, "g")) ?? []).length, 3);
   assert.equal((rendered.match(new RegExp(`image: ghcr.io/tsunheimat/codex-web-gateway:${tag}`, "g")) ?? []).length, 1);
   assert.doesNotMatch(rendered, /image: codex-web(-gateway)?:/);
   assert.match(rendered, /name: codex-web-desktop-ui\n\s+namespace: codex-web-gateway\n\s+port: 8214/);

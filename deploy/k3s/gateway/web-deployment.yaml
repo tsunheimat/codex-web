@@ -28,10 +28,44 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
+        # The packaged Desktop shell sends non-loopback app-server URLs through
+        # its fixed local SOCKS proxy. Forward a loopback URL to the gateway
+        # Service instead; the bridge and its WebSocket stay inside this Pod.
+        - name: gateway-loopback
+          image: codex-web:desktop-ui
+          imagePullPolicy: Always
+          restartPolicy: Always
+          command:
+            - node
+            - -e
+            - |
+              const net = require("node:net");
+              net.createServer((client) => {
+                const upstream = net.connect(8215, "codex-web-gateway");
+                client.pipe(upstream);
+                upstream.pipe(client);
+                client.on("error", () => upstream.destroy());
+                upstream.on("error", () => client.destroy());
+                client.on("close", () => upstream.destroy());
+                upstream.on("close", () => client.destroy());
+              }).listen(8215, "127.0.0.1");
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
         # The Desktop shell's startup opens its app-server WebSocket through
         # the gateway and the compatibility server exits when that connection
-        # is refused. Wait for the gateway Service before starting the shell
-        # so a gateway rollout does not leave the renderer crash-looping.
+        # is refused. Wait for the local forwarder and gateway Service before
+        # starting the shell so a rollout does not leave it crash-looping.
         - name: wait-for-gateway
           # Keep this image name identical to the main container so the
           # Kustomize image replacement updates both references.
@@ -59,7 +93,7 @@ spec:
               })();
           env:
             - name: CODEX_WEB_GATEWAY_URL
-              value: http://codex-web-gateway:8215
+              value: http://127.0.0.1:8215
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -98,7 +132,7 @@ spec:
             - name: CODEX_WEB_RUNTIME_OWNERSHIP
               value: external
             - name: CODEX_WEB_GATEWAY_URL
-              value: http://codex-web-gateway:8215
+              value: http://127.0.0.1:8215
             # Cluster-internal plain HTTP between the two pods only.
             - name: CODEX_WEB_GATEWAY_ALLOW_PLAIN_HTTP
               value: "true"

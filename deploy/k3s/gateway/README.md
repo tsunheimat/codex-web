@@ -9,9 +9,12 @@ runtime.
 
 The gateway uses `Dockerfile.gateway` (image `codex-web-gateway`), port **8215**,
 namespace `codex-web-gateway` and backend ID **windows-desktop**. The renderer
-uses the repository's default `Dockerfile` (image `codex-web`) on port **8214**
-with `CODEX_WEB_GATEWAY_URL` pointing at the gateway Service. Browsers reach the
-renderer at `/` and the gateway under `/api/`.
+uses the repository's default `Dockerfile` (image `codex-web`) on port **8214**.
+Its restartable `gateway-loopback` init sidecar forwards `127.0.0.1:8215` to the
+gateway Service, and `CODEX_WEB_GATEWAY_URL` uses that loopback address. The
+packaged Desktop shell otherwise sends non-loopback app-server URLs to its
+fixed local SOCKS proxy at `127.0.0.1:1080`, which is absent in this Pod.
+Browsers reach the renderer at `/` and the gateway under `/api/`.
 
 ## 1. Choose the host, image and storage
 
@@ -179,8 +182,9 @@ filesystem with emptyDir volumes at `/home/codex-web`, `/home/codex-web/.codex`,
 path as a `VOLUME`, and without an explicit mount containerd substitutes a
 root-owned anonymous directory, after which the shell exits with `EACCES`
 creating `.codex/sqlite` and the page answers 503. The shell also exits when the
-gateway refuses its app-server WebSocket at startup, so a `wait-for-gateway`
-init container polls the gateway Service first. Both containers answer
+gateway refuses its app-server WebSocket at startup, so the loopback sidecar
+starts first and a `wait-for-gateway` init container polls the Service through
+it. Both containers answer
 `/healthz` for their probes; the public `/healthz` is the gateway's.
 
 Verify the page itself, not only the gateway:
@@ -237,6 +241,7 @@ kubectl -n codex-web-gateway describe pvc codex-web-gateway-data
 | Database permission error           | Data volume is writable by UID/GID 1000                                           |
 | Renderer exits `EACCES ... .codex/sqlite` | `codex-home` emptyDir is mounted at `/home/codex-web/.codex` (see above)   |
 | Renderer exits `ECONNREFUSED`       | Gateway Service unreachable at shell startup; the init container should wait     |
+| Renderer exits `ECONNREFUSED 127.0.0.1:1080` | Confirm `gateway-loopback` runs before the renderer and both `CODEX_WEB_GATEWAY_URL` values use `http://127.0.0.1:8215` |
 | Page returns 404 `Route GET:/ not found` | HTTPRoute `/` rule points at the gateway instead of `codex-web-desktop-ui` |
 | Page returns 503                    | No ready renderer pod; check its startup/readiness probe and logs                 |
 | Browser API returns 403             | HTTPS frontend origin matches `allowedOrigins` exactly                            |
